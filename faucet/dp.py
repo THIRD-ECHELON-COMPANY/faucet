@@ -17,20 +17,22 @@
 # limitations under the License.
 
 import copy
-from collections import defaultdict
-import netaddr
+from collections import defaultdict, Counter
 import random
+import math
+import netaddr
 
-from datadiff import diff
 import networkx
 
 from faucet import faucet_pipeline
 from faucet import valve_of
-from faucet.conf import Conf, test_config_condition
-from faucet.valve import SUPPORTED_HARDWARE
-from faucet.faucet_pipeline import ValveTableConfig
-from faucet.valve_table import ValveTable, ValveGroupTable
 from faucet import valve_packet
+from faucet.acl import PORT_ACL_8021X
+from faucet.vlan import VLAN
+from faucet.conf import Conf, test_config_condition
+from faucet.faucet_pipeline import ValveTableConfig
+from faucet.valve import SUPPORTED_HARDWARE
+from faucet.valve_table import ValveTable, ValveGroupTable
 
 # Documentation generated using documentation_generator.py
 # For attributues to be included in documentation they must
@@ -66,8 +68,10 @@ configuration.
         # description, strictly informational
         'hardware': 'Open vSwitch',
         # The hardware maker (for chosing an openflow driver)
-        'arp_neighbor_timeout': 250,
-        # ARP and neighbor timeout (seconds)
+        'arp_neighbor_timeout': 30,
+        # ARP neighbor timeout (seconds)
+        'nd_neighbor_timeout': 30,
+        # IPv6 ND neighbor timeout (seconds)
         'ofchannel_log': None,
         # OF channel log
         'stack': None,
@@ -88,16 +92,18 @@ configuration.
         # Max hosts to try to resolve per gateway resolution cycle.
         'max_host_fib_retry_count': 10,
         # Max number of times to retry resolution of a host FIB route.
-        'max_resolve_backoff_time': 32,
+        'max_resolve_backoff_time': 64,
         # Max number of seconds to back off to when resolving nexthops.
         'packetin_pps': None,
         # Ask switch to rate limit packet pps. TODO: Not supported by OVS in 2.7.0
-        'learn_jitter': 10,
+        'learn_jitter': 0,
         # Jitter learn timeouts by up to this many seconds
-        'learn_ban_timeout': 10,
+        'learn_ban_timeout': 0,
         # When banning/limiting learning, wait this many seconds before learning can be retried
         'advertise_interval': 30,
-        # How often to advertise (eg. IPv6 RAs)
+        # How often to slow advertise (eg. IPv6 RAs)
+        'fast_advertise_interval': 5,
+        # How often to fast advertise (eg. LACP)
         'proactive_learn_v4': True,
         # whether proactive learning is enabled for IPv4 nexthops
         'proactive_learn_v6': True,
@@ -126,6 +132,18 @@ configuration.
         # Maximum table size for wildcard tables.
         'global_vlan': 0,
         # Reserved VID for internal global router VLAN.
+        'cache_update_guard_time': 0,
+        # Don't update L2 cache if port didn't change within this many seconds (default timeout/2).
+        'use_classification': False,
+        # Don't update L2 cache if port didn't change within this many seconds.
+        'egress_pipeline': False,
+        # Experimental inclusion of an egress pipeline
+        'strict_packet_in_cookie': True,
+        # Apply strict packet in checking to all packet ins.
+        'multi_out': True,
+        # Have OFA copy packet outs to multiple ports.
+        'idle_dst': True,
+        # If False, workaround for flow idle timer not reset on flow refresh.
         }
 
     defaults_types = {
@@ -143,13 +161,12 @@ configuration.
         'description': str,
         'hardware': str,
         'arp_neighbor_timeout': int,
+        'nd_neighbor_timeout': int,
         'ofchannel_log': str,
         'stack': dict,
         'ignore_learn_ins': int,
         'drop_broadcast_source_address': bool,
         'drop_spoofed_faucet_mac': bool,
-        'drop_bpdu': bool,
-        'drop_lldp': bool,
         'group_table': bool,
         'max_hosts_per_resolve_cycle': int,
         'max_host_fib_retry_count': int,
@@ -158,6 +175,7 @@ configuration.
         'learn_jitter': int,
         'learn_ban_timeout': int,
         'advertise_interval': int,
+        'fast_advertise_interval': int,
         'proactive_learn_v4': bool,
         'proactive_learn_v6': bool,
         'use_idle_timeout': bool,
@@ -171,16 +189,25 @@ configuration.
         'min_wildcard_table_size': int,
         'max_wildcard_table_size': int,
         'global_vlan': int,
+        'cache_update_guard_time': int,
+        'use_classification': bool,
+        'egress_pipeline': bool,
+        'strict_packet_in_cookie': bool,
+        'multi_out': bool,
+        'lacp_timeout': int,
+        'idle_dst': bool,
     }
 
     default_table_sizes_types = {
         'port_acl': int,
         'vlan': int,
         'vlan_acl': int,
+        'classification': int,
         'eth_src': int,
         'ipv4_fib': int,
         'ipv6_fib': int,
         'vip': int,
+        'eth_dst_hairpin': int,
         'eth_dst': int,
         'flood': int,
     }
@@ -197,6 +224,10 @@ configuration.
 
     dot1x_defaults_types = {
         'nfv_intf': str,
+        'nfv_sw_port': int,
+        'radius_ip': str,
+        'radius_port': int,
+        'radius_secret': str,
     }
 
 
@@ -205,10 +236,9 @@ configuration.
         self.acls = None
         self.acls_in = None
         self.advertise_interval = None
+        self.fast_advertise_interval = None
         self.arp_neighbor_timeout = None
-        self.bgp_local_address = None
-        self.bgp_neighbor_as = None
-        self.bgp_routerid = None
+        self.nd_neighbor_timeout = None
         self.combinatorial_port_flood = None
         self.configured = False
         self.cookie = None
@@ -220,7 +250,8 @@ configuration.
         self.drop_spoofed_faucet_mac = None
         self.dyn_last_coldstart_time = None
         self.dyn_running = False
-        self.dyn_up_ports = None
+        self.dyn_up_port_nos = None
+        self.egress_pipeline = None
         self.faucet_dp_mac = None
         self.global_vlan = None
         self.groups = None
@@ -253,7 +284,6 @@ configuration.
         self.proactive_nd_limit = None
         self.routers = None
         self.stack = None
-        self.stack_ports = None
         self.tables = None
         self.timeout = None
         self.unicast_flood = None
@@ -261,19 +291,38 @@ configuration.
         self.vlans = None
         self.min_wildcard_table_size = None
         self.max_wildcard_table_size = None
+        self.cache_update_guard_time = None
+        self.use_classification = None
+        self.strict_packet_in_cookie = None
+        self.multi_out = None
+        self.idle_dst = None
 
         self.acls = {}
         self.vlans = {}
         self.ports = {}
         self.routers = {}
         self.stack_ports = []
+        self.hairpin_ports = []
         self.output_only_ports = []
         self.lldp_beacon_ports = []
+        self.lacp_active_ports = []
         self.tables = {}
         self.meters = {}
         self.lldp_beacon = {}
         self.table_sizes = {}
-        self.dyn_up_ports = set()
+        self.dyn_up_port_nos = set()
+
+        #tunnel_id: int
+        #   ID of the tunnel, for now this will be the VLAN ID
+        #acl: ACL object
+        #   ACL rule to create the relevant tunnel conditions
+        #updated: bool
+        #   Whether the object has been updated, which will imply that it needs
+        #   to be applied by building the ofmsgs
+        #{tunnel_id: ACL}
+        self.tunnel_acls = {}
+        self.tunnel_updated_flags = {}
+
         super(DP, self).__init__(_id, dp_id, conf)
 
     def __str__(self):
@@ -289,9 +338,20 @@ configuration.
             'invalid MAC address %s' % self.faucet_dp_mac))
         test_config_condition(not (self.interfaces or self.interface_ranges), (
             'DP %s must have at least one interface' % self))
+        test_config_condition(self.timeout < 15, ('timeout must be > 15'))
         # To prevent L2 learning from timing out before L3 can refresh
-        test_config_condition(self.timeout < self.arp_neighbor_timeout, (
-            'L2 timeout must be >= L3 timeout'))
+        test_config_condition(not (self.arp_neighbor_timeout < (self.timeout / 2)), (
+            'L2 timeout must be > ARP timeout * 2'))
+        test_config_condition(not (self.nd_neighbor_timeout < (self.timeout / 2)), (
+            'L2 timeout must be > ND timeout * 2'))
+        test_config_condition(self.combinatorial_port_flood and self.group_table, (
+            'combinatorial_port_flood and group_table mutually exclusive'))
+        if self.cache_update_guard_time == 0:
+            self.cache_update_guard_time = int(self.timeout / 2)
+        if self.learn_jitter == 0:
+            self.learn_jitter = int(max(math.sqrt(self.timeout) * 3, 1))
+        if self.learn_ban_timeout == 0:
+            self.learn_ban_timeout = self.learn_jitter
         if self.lldp_beacon:
             self._check_conf_types(self.lldp_beacon, self.lldp_beacon_defaults_types)
             test_config_condition('send_interval' not in self.lldp_beacon, (
@@ -308,30 +368,138 @@ configuration.
             self._check_conf_types(self.dot1x, self.dot1x_defaults_types)
         self._check_conf_types(self.table_sizes, self.default_table_sizes_types)
 
-    def _configure_tables(self, override_table_config, valve_cl, vlan_port_factor):
+    def _generate_acl_tables(self):
+        all_acls = {}
+        if self.dot1x:
+            all_acls['port_acl'] = [PORT_ACL_8021X]
+
+        for vlan in self.vlans.values():
+            if vlan.acls_in:
+                all_acls.setdefault('vlan_acl', [])
+                all_acls['vlan_acl'].extend(vlan.acls_in)
+        if self.dp_acls:
+            test_config_condition(self.dot1x, (
+                'DP ACLs and 802.1x cannot be configured together'))
+            for acl in self.dp_acls:
+                all_acls['port_acl'] = self.dp_acls
+        else:
+            for port in self.ports.values():
+                if port.acls_in:
+                    test_config_condition(port.dot1x, (
+                        'port ACLs and 802.1x cannot be configured together'))
+                    all_acls.setdefault('port_acl', [])
+                    all_acls['port_acl'].extend(port.acls_in)
+
+        table_config = {}
+        for table_name, acls in all_acls.items():
+            matches = {}
+            set_fields = set()
+            meter = False
+            exact_match = False
+            default = faucet_pipeline.DEFAULT_CONFIGS[table_name]
+            for acl in acls:
+                for field, has_mask in acl.matches.items():
+                    if has_mask or field not in matches:
+                        matches[field] = has_mask
+                set_fields.update(acl.set_fields)
+                meter = meter or acl.meter
+                exact_match = acl.exact_match
+            table_config[table_name] = ValveTableConfig(
+                table_name,
+                default.table_id,
+                exact_match=exact_match,
+                meter=meter,
+                output=True,
+                match_types=tuple(sorted(matches.items())),
+                set_fields=tuple(sorted(set_fields)),
+                next_tables=default.next_tables)
+        # TODO: dynamically configure output attribue
+        return table_config
+
+    def _configure_tables(self):
         """Configure FAUCET pipeline with tables."""
+        valve_cl = SUPPORTED_HARDWARE.get(self.hardware, None)
+        test_config_condition(
+            not valve_cl, 'hardware %s must be in %s' % (
+                self.hardware, SUPPORTED_HARDWARE.keys()))
+        if valve_cl is None:
+            return
+
         tables = {}
         self.groups = ValveGroupTable()
         relative_table_id = 0
-        for table_id, canonical_table_config in enumerate(faucet_pipeline.FAUCET_PIPELINE):
-            table_config = copy.deepcopy(canonical_table_config)
-            table_name = table_config.name
-            if table_name in override_table_config:
-                table_config = override_table_config[table_name]
+        included_tables = copy.deepcopy(faucet_pipeline.MINIMUM_FAUCET_PIPELINE_TABLES)
+        acl_tables = self._generate_acl_tables()
+        included_tables.update(acl_tables.keys())
+        # Only configure IP routing tables if enabled.
+        for vlan in self.vlans.values():
+            for ipv in vlan.ipvs():
+                included_tables.add('ipv%u_fib' % ipv)
+                included_tables.add('vip')
+        if valve_cl.STATIC_TABLE_IDS:
+            included_tables.add('port_acl')
+        if self.hairpin_ports:
+            included_tables.add('eth_dst_hairpin')
+        if self.use_classification:
+            included_tables.add('classification')
+        if self.egress_pipeline:
+            included_tables.add('egress')
+        canonical_configs = [
+            config for config in faucet_pipeline.FAUCET_PIPELINE
+            if config.name in included_tables]
+        table_configs = {}
+        for relative_table_id, canonical_table_config in enumerate(canonical_configs, start=0):
+            name = canonical_table_config.name
+            table_config = acl_tables.get(
+                name, copy.deepcopy(canonical_table_config))
+            if not self.egress_pipeline:
+                table_config.metadata_write = 0
+                table_config.metadata_match = 0
+            if not valve_cl.STATIC_TABLE_IDS:
+                table_config.table_id = relative_table_id
+            table_configs[name] = table_config
+
+        # Stacking with external ports, so need loop protection field.
+        if self.stack and self.stack.get('externals', False):
+            flood_table = table_configs['flood']
+            flood_table.set_fields = (faucet_pipeline.STACK_LOOP_PROTECT_FIELD,)
+            flood_table.match_types += ((faucet_pipeline.STACK_LOOP_PROTECT_FIELD, False),)
+            vlan_table = table_configs['vlan']
+            vlan_table.set_fields += (faucet_pipeline.STACK_LOOP_PROTECT_FIELD,)
+            vlan_table.match_types += ((faucet_pipeline.STACK_LOOP_PROTECT_FIELD, False),)
+            eth_dst_table = table_configs['eth_dst']
+            eth_dst_table.set_fields = (faucet_pipeline.STACK_LOOP_PROTECT_FIELD,)
+
+        oxm_fields = set(valve_of.MATCH_FIELDS.keys())
+
+        for table_name, table_config in table_configs.items():
+            if table_config.set_fields:
+                set_fields = set(table_config.set_fields)
+                test_config_condition(
+                    not set_fields.issubset(oxm_fields),
+                    'set_fields not all OpenFlow OXM fields %s' % (set_fields - oxm_fields))
+            if table_config.match_types:
+                matches = set(match for match, _ in table_config.match_types)
+                test_config_condition(
+                    not matches.issubset(oxm_fields),
+                    'matches not all OpenFlow OXM fields %s' % (matches - oxm_fields))
             size = self.table_sizes.get(table_name, self.min_wildcard_table_size)
             if table_config.vlan_port_scale:
+                vlan_port_factor = len(self.vlans) * len(self.ports)
                 size = max(size, int(vlan_port_factor * float(table_config.vlan_port_scale)))
             if not table_config.exact_match:
                 size = min(size, self.max_wildcard_table_size)
                 size = int(size / self.min_wildcard_table_size) * self.min_wildcard_table_size
             table_config.size = size
-            if table_config.match_types:
-                if not valve_cl.STATIC_TABLE_IDS:
-                    table_id = relative_table_id
-                tables[table_name] = ValveTable(
-                    table_id, table_name, table_config, self.cookie,
-                    notify_flow_removed=self.use_idle_timeout)
-                relative_table_id += 1
+            table_config.next_tables = [
+                table_name for table_name in table_config.next_tables if table_name in table_configs]
+            next_table_ids = [
+                table_configs[table_name].table_id for table_name in table_config.next_tables]
+            tables[table_name] = ValveTable(
+                table_name, table_config, self.cookie,
+                notify_flow_removed=self.use_idle_timeout,
+                next_tables=next_table_ids
+                )
         self.tables = tables
 
     def set_defaults(self):
@@ -345,21 +513,57 @@ configuration.
         self._set_default('description', self.name)
 
     def table_by_id(self, table_id):
-        tables = [table for table in list(self.tables.values()) if table_id == table.table_id]
+        """Gets first table with table id"""
+        tables = [table for table in self.tables.values() if table_id == table.table_id]
         if tables:
             return tables[0]
         return None
 
+    def port_no_valid(self, port_no):
+        """Return True if supplied port number valid on this datapath."""
+        return not valve_of.ignore_port(port_no) and port_no in self.ports
+
+    def base_prom_labels(self):
+        """Return base Prometheus labels for this DP."""
+        return dict(dp_id=hex(self.dp_id), dp_name=self.name)
+
+    def port_labels(self, port_no):
+        """Return port name and description labels for a port number."""
+        port_name = str(port_no)
+        port_description = None
+        if port_no in self.ports:
+            port = self.ports[port_no]
+            port_name = port.name
+            port_description = port.description
+        elif port_no == valve_of.ofp.OFPP_CONTROLLER:
+            port_name = 'CONTROLLER'
+        elif port_no == valve_of.ofp.OFPP_LOCAL:
+            port_name = 'LOCAL'
+        if port_description is None:
+            port_description = port_name
+        return dict(self.base_prom_labels(), port=port_name, port_description=port_description)
+
+    def classification_table(self):
+        """Returns classification table"""
+        if self.use_classification:
+            return self.tables['classification']
+        return self.tables['eth_src']
+
+    def output_tables(self):
+        """Return tables that cause a packet to be forwarded."""
+        if self.hairpin_ports:
+            return (self.tables['eth_dst_hairpin'], self.tables['eth_dst'])
+        return (self.tables['eth_dst'],)
+
+    def output_table(self):
+        """Returns first output table"""
+        return self.output_tables()[0]
+
     def match_tables(self, match_type):
         """Return list of tables with matches of a specific match type."""
-        match_tables = []
-        for table in list(self.tables.values()):
-            if table.match_types is not None:
-                if match_type in table.match_types:
-                    match_tables.append(table)
-            else:
-                match_tables.append(table)
-        return match_tables
+        return [
+            table for table in self.tables.values()
+            if table.match_types is None or match_type in table.match_types]
 
     def in_port_tables(self):
         """Return list of tables that specify in_port as a match."""
@@ -379,10 +583,14 @@ configuration.
         self.ports[port_num] = port
         if port.output_only:
             self.output_only_ports.append(port)
-        elif port.stack is not None:
+        if port.stack:
             self.stack_ports.append(port)
         if port.lldp_beacon_enabled():
             self.lldp_beacon_ports.append(port)
+        if port.hairpin or port.hairpin_unicast:
+            self.hairpin_ports.append(port)
+        if port.lacp and port.lacp_active:
+            self.lacp_active_ports.append(port)
 
     def lldp_beacon_send_ports(self, now):
         """Return list of ports to send LLDP packets; stacked ports always send LLDP."""
@@ -467,11 +675,14 @@ configuration.
             if dp.stack is not None:
                 stack_dps.append(dp)
                 if 'priority' in dp.stack:
+                    test_config_condition(not isinstance(dp.stack['priority'], int), (
+                        'stack priority must be type %s not %s' % (
+                            int, type(dp.stack['priority']))))
                     test_config_condition(dp.stack['priority'] <= 0, (
                         'stack priority must be > 0'))
                     test_config_condition(root_dp is not None, 'cannot have multiple stack roots')
                     root_dp = dp
-                    for vlan in list(dp.vlans.values()):
+                    for vlan in dp.vlans.values():
                         test_config_condition(vlan.faucet_vips, (
                             'routing + stacking not supported'))
 
@@ -479,7 +690,7 @@ configuration.
             test_config_condition(stack_dps, 'stacking enabled but no root_dp')
             return
 
-        edge_count = {}
+        edge_count = Counter()
 
         graph = networkx.MultiGraph()
         for dp in dps:
@@ -487,11 +698,9 @@ configuration.
                 graph.add_node(dp.name)
                 for port in dp.stack_ports:
                     edge_name = self.add_stack_link(graph, dp, port)
-                    if edge_name not in edge_count:
-                        edge_count[edge_name] = 0
                     edge_count[edge_name] += 1
         if graph.size():
-            for edge_name, count in list(edge_count.items()):
+            for edge_name, count in edge_count.items():
                 test_config_condition(count != 2, '%s defined only in one direction' % edge_name)
             if self.name in graph:
                 if self.stack is None:
@@ -507,6 +716,37 @@ configuration.
                         path_to_root_len, longest_path_to_root_len)
                 self.stack['longest_path_to_root_len'] = longest_path_to_root_len
 
+        if self.tunnel_acls:
+            self.finalize_tunnel_acls(dps)
+
+    def finalize_tunnel_acls(self, dps):
+        """
+        Turn off ACLs not in use and resolve the src dp & port for relevant ACLs
+        Args:
+            dps (list):
+        """
+        remove_ids = []
+        for tunnel_id, tunnel_acl in self.tunnel_acls.items():
+            asrc_dp = tunnel_acl.tunnel_info[tunnel_id]['src_dp']
+            if asrc_dp is not None:
+                continue
+            for dp in dps:
+                if tunnel_id in dp.tunnel_acls:
+                    other_acl = dp.tunnel_acls[tunnel_id]
+                    bsrc_dp = other_acl.tunnel_info[tunnel_id]['src_dp']
+                    if bsrc_dp is not None:
+                        tunnel_acl.tunnel_info[tunnel_id]['src_dp'] = bsrc_dp
+                        break
+                    else:
+                        continue
+            if tunnel_acl.tunnel_info[tunnel_id]['src_dp'] is None:
+                remove_ids.append(tunnel_id)
+                continue
+        for tunnel_id in remove_ids:
+            self.tunnel_acls.pop(tunnel_id)
+        for tunnel_id, tunnel_acl in self.tunnel_acls.items():
+            self.tunnel_updated_flags[tunnel_id] = False
+
     def shortest_path(self, dest_dp, src_dp=None):
         """Return shortest path to a DP, as a list of DPs."""
         if src_dp is None:
@@ -515,7 +755,7 @@ configuration.
             try:
                 return networkx.shortest_path(
                     self.stack['graph'], src_dp, dest_dp)
-            except networkx.exception.NetworkXNoPath:
+            except (networkx.exception.NetworkXNoPath, networkx.exception.NodeNotFound):
                 pass
         return []
 
@@ -530,7 +770,7 @@ configuration.
 
     def is_stack_root(self):
         """Return True if this DP is the root of the stack."""
-        return 'priority' in self.stack
+        return self.stack and 'priority' in self.stack
 
     def is_stack_edge(self):
         """Return True if this DP is a stack edge."""
@@ -553,14 +793,30 @@ configuration.
                 return peer_dp_ports[0]
         return None
 
-    def reset_refs(self, vlans=None):
+    def is_in_path(self, src_dp, dst_dp):
+        """
+        Returns true if the current DP is in the path from src_dp to dst_dp
+        Args:
+            src_dp (DP):
+            dst_dp (DP):
+        Returns:
+            bool: True if self is in the path from the src_dp to the dst_dp
+                  False otherwise
+        """
+        path = self.shortest_path(dst_dp.name, src_dp.name)
+        return self.name in path
+
+    def reset_refs(self, vlans=None, root_dp=None):
+        """Resets vlan references"""
         if vlans is None:
             vlans = self.vlans
         self.vlans = {}
-        for vlan in list(vlans.values()):
-            vlan.reset_ports(list(self.ports.values()))
-            if vlan.get_ports():
+        for vlan in vlans.values():
+            vlan.reset_ports(self.ports.values())
+            if vlan.get_ports() or vlan.reserved_internal_vlan:
                 self.vlans[vlan.vid] = vlan
+        if root_dp is not None:
+            self.stack['root_dp'] = root_dp
 
     def resolve_port(self, port_name):
         """Resolve a port by number or name."""
@@ -568,7 +824,7 @@ configuration.
             if port_name in self.ports:
                 return self.ports[port_name]
         elif isinstance(port_name, str):
-            resolved_ports = [port for port in list(self.ports.values()) if port_name == port.name]
+            resolved_ports = [port for port in self.ports.values() if port_name == port.name]
             if resolved_ports:
                 return resolved_ports[0]
         return None
@@ -578,6 +834,7 @@ configuration.
 
         dp_by_name = {}
         vlan_by_name = {}
+        vlans_with_external_ports = set()
 
         def resolve_ports(port_names):
             """Resolve list of ports, by port by name or number."""
@@ -598,25 +855,38 @@ configuration.
                 return self.vlans[vlan_name]
             return None
 
+        def resolve_vlans(vlan_names):
+            """Resolve a list of VLAN names."""
+            vlans = []
+            for vlan_name in vlan_names:
+                vlan = resolve_vlan(vlan_name)
+                if vlan:
+                    vlans.append(vlan)
+            return vlans
+
         def resolve_stack_dps():
             """Resolve DP references in stacking config."""
-            port_stack_dp = {}
-            for port in self.stack_ports:
-                stack_dp = port.stack['dp']
-                test_config_condition(stack_dp not in dp_by_name, (
-                    'stack DP %s not defined' % stack_dp))
-                port_stack_dp[port] = dp_by_name[stack_dp]
-            for port, dp in list(port_stack_dp.items()):
-                port.stack['dp'] = dp
-                stack_port = dp.resolve_port(port.stack['port'])
-                test_config_condition(stack_port is None, (
-                    'stack port %s not defined in DP %s' % (port.stack['port'], dp.name)))
-                port.stack['port'] = stack_port
+            if self.stack_ports:
+                if self.stack is None:
+                    self.stack = {}
+                self.stack['externals'] = bool(vlans_with_external_ports)
+                port_stack_dp = {}
+                for port in self.stack_ports:
+                    stack_dp = port.stack['dp']
+                    test_config_condition(stack_dp not in dp_by_name, (
+                        'stack DP %s not defined' % stack_dp))
+                    port_stack_dp[port] = dp_by_name[stack_dp]
+                for port, dp in port_stack_dp.items():
+                    port.stack['dp'] = dp
+                    stack_port = dp.resolve_port(port.stack['port'])
+                    test_config_condition(stack_port is None, (
+                        'stack port %s not defined in DP %s' % (port.stack['port'], dp.name)))
+                    port.stack['port'] = stack_port
 
         def resolve_mirror_destinations():
             """Resolve mirror port references and destinations."""
             mirror_from_port = defaultdict(list)
-            for mirror_port in list(self.ports.values()):
+            for mirror_port in self.ports.values():
                 if mirror_port.mirror is not None:
                     mirrored_ports = resolve_ports(mirror_port.mirror)
                     test_config_condition(len(mirrored_ports) != len(mirror_port.mirror), (
@@ -626,7 +896,7 @@ configuration.
 
             # TODO: confusingly, mirror at config time means what ports to mirror from.
             # But internally we use as a list of ports to mirror to.
-            for mirrored_port, mirror_ports in list(mirror_from_port.items()):
+            for mirrored_port, mirror_ports in mirror_from_port.items():
                 mirrored_port.mirror = []
                 for mirror_port in mirror_ports:
                     mirrored_port.mirror.append(mirror_port.number)
@@ -634,255 +904,248 @@ configuration.
 
         def resolve_override_output_ports():
             """Resolve override output ports."""
-            for port_no, port in list(self.ports.items()):
+            for port_no, port in self.ports.items():
                 if port.override_output_port:
                     port.override_output_port = self.resolve_port(port.override_output_port)
                     test_config_condition(not port.override_output_port, (
                         'override_output_port port not defined'))
                     self.ports[port_no] = port
 
-        def resolve_acl(acl_in, vid):
-            """Resolve an individual ACL."""
+        def resolve_acl(acl_in, dp=None, vid=None, port_num=None): #pylint: disable=invalid-name
+            """
+            Resolve an individual ACL
+            Args:
+                acl_in (str): ACL name to find reference in the acl list
+                dp (DP): DP the ACL is being applied to
+                vid (int): VID of the VLAN the ACL is being applied to
+                port_num (int): The number of the port the ACl is being applied to
+            Returns:
+                matches, set_fields, meter (3-Tuple): ACL matches, set fields and meter values
+            """
             test_config_condition(acl_in not in self.acls, (
                 'missing ACL %s in DP: %s' % (acl_in, self.name)))
             acl = self.acls[acl_in]
+
             def resolve_port_cb(port_name):
+                """Resolve port"""
                 port = self.resolve_port(port_name)
                 if port:
                     return port.number
                 return port
 
-            acl.resolve_ports(resolve_port_cb)
+            def resolve_tunnel_objects(dst_dp_name, dst_port_name, tunnel_id_name):
+                """
+                Resolves the names of the tunnel src and dst (DP & port) pairs into the correct \
+                    objects
+                Args:
+                    dst_dp (str): DP of the tunnel's destination port
+                    dst_port (int): Destination port of the tunnel
+                    tunnel_id_name (int or str): Tunnel identification number or VLAN reference
+                Returns:
+                    src_dp, src_port, dst_dp, dst_port (4-Tuple): Resolved
+                        src_dp DP obj, src_port PORT obj, dst_dp DP obj and dst_port PORT obj
+                """
+                tunnel_vlan = resolve_vlan(tunnel_id_name)
+                if tunnel_vlan:
+                    test_config_condition(not tunnel_vlan.reserved_internal_vlan, (
+                        'VLAN %s is required for use by tunnel %s but is not reserved' % (
+                            tunnel_vlan.name, tunnel_id_name)))
+                else:
+                    test_config_condition(isinstance(tunnel_id_name, str), (
+                        'Tunnel VLAN (%s) does not exist' % tunnel_id_name))
+                    tunnel_vlan = VLAN(tunnel_id_name, self.dp_id, None)
+                    tunnel_vlan.reserved_internal_vlan = True
+                    self.vlans[tunnel_vlan.vid] = tunnel_vlan
+                tunnel_id = tunnel_vlan.vid
+                test_config_condition(tunnel_id in self.tunnel_acls, (
+                    'Tunnel ID %s is already applied to DP %s' % (tunnel_id, self.name)))
+                test_config_condition(dst_dp_name not in dp_by_name, (
+                    'Could not find referenced destination DP (%s) for tunnel ACL %s' % (
+                        dst_dp_name, acl_in)))
+                dst_dp = dp_by_name[dst_dp_name]
+                dst_port = dst_dp.resolve_port(dst_port_name)
+                test_config_condition(dst_port is None, (
+                    'Could not find referenced destination port (%s) for tunnel ACL %s' % (
+                        dst_port_name, acl_in)))
+                dst_port = dst_port.number
+                if vid is not None:
+                    #VLAN ACL
+                    test_config_condition(True, 'Tunnels do not support VLAN-ACLs')
+                elif dp is not None:
+                    #DP ACL
+                    test_config_condition(True, 'Tunnels do not support DP-ACLs')
+                elif port_num is not None:
+                    #Port ACL
+                    src_dp = self
+                    src_port = src_dp.resolve_port(port_num)
+                    test_config_condition(src_port is None, (
+                        'Could not find source port (%s) in source DP (%s) for tunnel ACL %s' % (
+                            port_num, src_dp.name, acl_in)))
+                    if src_port is not None:
+                        src_port = src_port.number
+                elif vid is None and port_num is None:
+                    #Forwarding ACL
+                    src_dp = None
+                    src_port = None
+                    tunnel_vlan.acls_in = [acl]
+                self.tunnel_acls[tunnel_id] = acl
+                return (src_dp, src_port, dst_dp, dst_port, tunnel_id)
 
+            acl.resolve_ports(resolve_port_cb, resolve_tunnel_objects)
             for meter_name in acl.get_meters():
                 test_config_condition(meter_name not in self.meters, (
                     'meter %s is not configured' % meter_name))
             for port_no in acl.get_mirror_destinations():
                 port = self.ports[port_no]
                 port.output_only = True
-            return acl.build(vid, self.meters)
+            return acl.build(self.meters, vid, port_num)
 
         def verify_acl_exact_match(acls):
+            """Verify ACLs have equal exact matches"""
             for acl in acls:
                 test_config_condition(acl.exact_match != acls[0].exact_match, (
                     'ACLs when used together must have consistent exact_match'))
-            return acls[0].exact_match
 
-        def resolve_acls(valve_cl):
+        def resolve_acls():
             """Resolve config references in ACLs."""
             # TODO: move this config validation to ACL object.
-            port_acl_enabled = valve_cl.STATIC_TABLE_IDS
-            port_acl_matches = {}
-            port_acl_set_fields = set()
-            port_acl_exact_match = False
-            port_acl_meter = False
-            vlan_acl_matches = {}
-            vlan_acl_exact_match = False
-            vlan_acl_set_fields = set()
-            vlan_acl_meter = False
-
-            def merge_matches(matches, new_matches):
-                for field, has_mask in list(new_matches.items()):
-                    if has_mask or field not in matches:
-                        matches[field] = has_mask
-
-            for vlan in list(self.vlans.values()):
+            resolved = []
+            for vlan in self.vlans.values():
                 if vlan.acls_in:
                     acls = []
                     for acl in vlan.acls_in:
-                        matches, set_fields, meter = resolve_acl(acl, vlan.vid)
-                        merge_matches(vlan_acl_matches, matches)
-                        vlan_acl_set_fields = vlan_acl_set_fields.union(set_fields)
-                        if meter:
-                            vlan_acl_meter = True
+                        resolve_acl(acl, vid=vlan.vid)
                         acls.append(self.acls[acl])
+                        resolved.append(acl)
                     vlan.acls_in = acls
-                    vlan_acl_exact_match = verify_acl_exact_match(acls)
-            for port in list(self.ports.values()):
+                    verify_acl_exact_match(acls)
+            for port in self.ports.values():
                 if port.acls_in:
                     test_config_condition(self.dp_acls, (
                         'dataplane ACLs cannot be used with port ACLs.'))
                     acls = []
                     for acl in port.acls_in:
-                        matches, set_fields, meter = resolve_acl(acl, None)
-                        merge_matches(port_acl_matches, matches)
-                        port_acl_set_fields = port_acl_set_fields.union(set_fields)
-                        if meter:
-                            port_acl_meter = True
+                        resolve_acl(acl, port_num=port.number)
                         acls.append(self.acls[acl])
+                        resolved.append(acl)
                     port.acls_in = acls
-                    port_acl_exact_match = verify_acl_exact_match(acls)
-                    port_acl_enabled = True
+                    verify_acl_exact_match(acls)
             if self.dp_acls:
                 acls = []
                 for acl in self.acls:
-                    matches, set_fields, meter = resolve_acl(acl, None)
-                    merge_matches(port_acl_matches, matches)
-                    port_acl_set_fields = port_acl_set_fields.union(set_fields)
-                    if meter:
-                        port_acl_meter = True
+                    resolve_acl(acl, dp=self)
                     acls.append(self.acls[acl])
+                    resolved.append(acl)
                 self.dp_acls = acls
-                port_acl_enabled = True
-            if port_acl_enabled:
-                port_acl_matches.update({'in_port': False})
-            port_acl_matches = {(field, mask) for field, mask in list(port_acl_matches.items())}
-            vlan_acl_matches = {(field, mask) for field, mask in list(vlan_acl_matches.items())}
+            for acl in self.acls:
+                if acl not in resolved and self.acls[acl].get_tunnel_rule_indices():
+                    resolve_acl(acl, None)
+                    resolved.append(acl)
+            if self.tunnel_acls:
+                for tunnel_acl in self.tunnel_acls.values():
+                    tunnel_acl.verify_tunnel_compatibility_rules(self)
 
-            # TODO: skip port_acl table if not configured.
-            # TODO: dynamically configure output attribue
-            override_table_config = {
-                'port_acl': ValveTableConfig(
-                    'port_acl',
-                    exact_match=port_acl_exact_match,
-                    meter=port_acl_meter,
-                    output=True,
-                    match_types=port_acl_matches,
-                    set_fields=tuple(port_acl_set_fields)),
-                'vlan_acl': ValveTableConfig(
-                    'vlan_acl',
-                    exact_match=vlan_acl_exact_match,
-                    meter=vlan_acl_meter,
-                    output=True,
-                    match_types=vlan_acl_matches,
-                    set_fields=tuple(vlan_acl_set_fields)),
-            }
-            return override_table_config
-
-        def resolve_vlan_names_in_routers():
+        def resolve_routers():
             """Resolve VLAN references in routers."""
             dp_routers = {}
-            for router_name, router in list(self.routers.items()):
-                vlans = []
-                for vlan_name in router.vlans:
-                    vlan = resolve_vlan(vlan_name)
-                    if vlan is not None:
-                        vlans.append(vlan)
-                if len(vlans) > 1:
+            for router_name, router in self.routers.items():
+                if router.bgp_vlan():
+                    router.set_bgp_vlan(resolve_vlan(router.bgp_vlan()))
+                vlans = resolve_vlans(router.vlans)
+                if vlans or router.bgp_vlan():
                     dp_router = copy.copy(router)
                     dp_router.vlans = vlans
                     dp_routers[router_name] = dp_router
+            self.routers = dp_routers
+
+            if self.global_vlan:
+                vids = {vlan.vid for vlan in self.vlans.values()}
+                test_config_condition(
+                    self.global_vlan in vids, 'global_vlan VID %s conflicts with existing VLAN' % self.global_vlan)
+
+            # Check for overlapping VIP subnets or VLANs.
+            all_router_vlans = set()
+            for router_name, router in self.routers.items():
                 vips = set()
-                for vlan in vlans:
-                    for vip in vlan.faucet_vips:
-                        if vip.ip.is_link_local:
-                            continue
-                        vips.add(vip)
+                if router.vlans and len(router.vlans) == 1:
+                    lone_vlan = router.vlans[0]
+                    test_config_condition(
+                        lone_vlan in all_router_vlans, 'single VLAN %s in more than one router' % lone_vlan)
+                for vlan in router.vlans:
+                    vips.update({vip for vip in vlan.faucet_vips if not vip.ip.is_link_local})
+                all_router_vlans.update(router.vlans)
                 for vip in vips:
                     for other_vip in vips - set([vip]):
                         test_config_condition(
                             vip.ip in other_vip.network,
                             'VIPs %s and %s overlap in router %s' % (
                                 vip, other_vip, router_name))
-            self.routers = dp_routers
+            bgp_routers = self.bgp_routers()
+            if bgp_routers:
+                for bgp_router in bgp_routers:
+                    bgp_vlan = bgp_router.bgp_vlan()
+                    vlan_dps = [dp for dp in dps if bgp_vlan.vid in dp.vlans]
+                    test_config_condition(len(vlan_dps) != 1, (
+                        'DPs %s sharing a BGP speaker VLAN is unsupported'))
+                    test_config_condition(bgp_router.bgp_server_addresses() != (
+                        bgp_routers[0].bgp_server_addresses()), (
+                            'BGP server addresses must all be the same'))
+                router_ids = {bgp_router.bgp_routerid() for bgp_router in bgp_routers}
+                test_config_condition(len(router_ids) != 1, 'BGP router IDs must all be the same: %s' % router_ids)
+                bgp_ports = {bgp_router.bgp_port() for bgp_router in bgp_routers}
+                test_config_condition(len(bgp_ports) != 1, 'BGP ports must all be the same: %s' % bgp_ports)
+
 
         test_config_condition(not self.vlans, 'no VLANs referenced by interfaces in %s' % self.name)
-        valve_cl = SUPPORTED_HARDWARE.get(self.hardware, None)
-        test_config_condition(
-            not valve_cl, 'hardware %s must be in %s' % (
-                self.hardware, list(SUPPORTED_HARDWARE.keys())))
-
-        for dp in dps:
-            dp_by_name[dp.name] = dp
-        for vlan in list(self.vlans.values()):
-            vlan_by_name[vlan.name] = vlan
-            if self.global_vlan:
-                test_config_condition(
-                    self.global_vlan == vlan.vid, 'VLAN %u is reserved by global_vlan' % vlan.vid)
+        dp_by_name = {dp.name: dp for dp in dps}
+        vlan_by_name = {vlan.name: vlan for vlan in self.vlans.values()}
+        vlans_with_external_ports = {
+            vlan for vlan in self.vlans.values() if vlan.loop_protect_external_ports()}
 
         resolve_stack_dps()
         resolve_mirror_destinations()
         resolve_override_output_ports()
-        resolve_vlan_names_in_routers()
-        override_table_config = resolve_acls(valve_cl)
+        resolve_acls()
+        resolve_routers()
 
-        # Only configure IP routing tables if enabled.
-        ipvs = set()
-        for vlan in list(self.vlans.values()):
-            ipvs = ipvs.union(vlan.ipvs())
-        for ipv in (4, 6):
-            if ipv not in ipvs:
-                table_name = 'ipv%u_fib' % ipv
-                override_table_config[table_name] = ValveTableConfig(table_name)
-        if not ipvs:
-            override_table_config['vip'] = ValveTableConfig('vip')
+        self._configure_tables()
 
-        vlan_port_factor = len(self.vlans) * len(self.ports)
-        self._configure_tables(override_table_config, valve_cl, vlan_port_factor)
-
-        bgp_vlans = self.bgp_vlans()
-        if bgp_vlans:
-            for vlan in bgp_vlans:
-                vlan_dps = [dp for dp in dps if vlan.vid in dp.vlans]
-                test_config_condition(len(vlan_dps) != 1, (
-                    'DPs %s sharing a BGP speaker VLAN is unsupported'))
-            router_ids = {vlan.bgp_routerid for vlan in bgp_vlans}
-            test_config_condition(len(router_ids) != 1, 'BGP router IDs must all be the same')
-            bgp_ports = {vlan.bgp_port for vlan in bgp_vlans}
-            test_config_condition(len(bgp_ports) != 1, 'BGP ports must all be the same')
-            for vlan in bgp_vlans:
-                test_config_condition(vlan.bgp_server_addresses != (
-                    bgp_vlans[0].bgp_server_addresses), (
-                        'BGP server addresses must all be the same'))
-
-        for port in list(self.ports.values()):
+        for port in self.ports.values():
             port.finalize()
-        for vlan in list(self.vlans.values()):
+        for vlan in self.vlans.values():
             vlan.finalize()
-        for acl in list(self.acls.values()):
+        for acl in self.acls.values():
             acl.finalize()
-        for router in list(self.routers.values()):
+        for router in self.routers.values():
             router.finalize()
         self.finalize()
 
     def get_native_vlan(self, port_num):
         """Return native VLAN for a port by number, or None."""
-        if port_num in self.ports:
+        try:
             return self.ports[port_num].native_vlan
-        return None
+        except KeyError:
+            return None
 
-    def bgp_vlans(self):
-        """Return list of VLANs with BGP enabled."""
-        return tuple([vlan for vlan in list(self.vlans.values()) if vlan.bgp_as])
+    def bgp_routers(self):
+        """Return list of routers with BGP enabled."""
+        return tuple([router for router in self.routers.values() if router.bgp_as() and router.bgp_vlan()])
 
     def dot1x_ports(self):
         """Return list of ports with 802.1x enabled."""
-        return tuple([port for port in list(self.ports.values()) if port.dot1x])
-
-    def to_conf(self):
-        """Return DP config as dict."""
-        result = super(DP, self).to_conf()
-        if result is not None:
-            if 'stack' in result:
-                if result['stack'] is not None:
-                    result['stack'] = {
-                        'root_dp': str(self.stack['root_dp'])
-                    }
-            interface_dict = {}
-            for port in list(self.ports.values()):
-                interface_dict[port.name] = port.to_conf()
-            result['interfaces'] = interface_dict
-        return result
+        return tuple([port for port in self.ports.values() if port.dot1x])
 
     def get_tables(self):
         """Return tables as dict for API call."""
-        result = {}
-        for table_name, table in list(self.tables.items()):
-            result[table_name] = table.table_id
-        return result
+        return {
+            table_name: table.table_id for table_name, table in self.tables.items()}
 
     def get_config_dict(self):
         """Return DP config as a dict for API call."""
-        vlans_dict = {}
-        for vlan in list(self.vlans.values()):
-            vlans_dict[vlan.name] = vlan.to_conf()
-        acls_dict = {}
-        for acl_id, acl in list(self.acls.items()):
-            acls_dict[acl_id] = acl.to_conf()
         return {
             'dps': {self.name: self.to_conf()},
-            'vlans': vlans_dict,
-            'acls': acls_dict}
+            'vlans': {vlan.name: vlan.to_conf() for vlan in self.vlans.values()},
+            'acls': {acl_id: acl.to_conf() for acl_id, acl in self.acls.items()}}
 
     def _get_acl_config_changes(self, logger, new_dp):
         """Detect any config changes to ACLs.
@@ -894,14 +1157,15 @@ configuration.
             changed_acls (dict): ACL ID map to new/changed ACLs.
         """
         changed_acls = {}
-        for acl_id, new_acl in list(new_dp.acls.items()):
+        for acl_id, new_acl in new_dp.acls.items():
             if acl_id not in self.acls:
                 changed_acls[acl_id] = new_acl
                 logger.info('ACL %s new' % acl_id)
             else:
-                if new_acl != self.acls[acl_id]:
+                acl = self.acls[acl_id]
+                if acl != new_acl:
                     changed_acls[acl_id] = new_acl
-                    logger.info('ACL %s changed' % acl_id)
+                    logger.info('ACL %s changed: %s' % (acl_id, acl.conf_diff(new_acl)))
         return changed_acls
 
     def _get_vlan_config_changes(self, logger, new_dp):
@@ -915,13 +1179,12 @@ configuration.
                 deleted_vlans (set): deleted VLAN IDs.
                 changed_vlans (set): changed/added VLAN IDs.
         """
-        deleted_vlans = set([])
-        for vid in list(self.vlans.keys()):
-            if vid not in new_dp.vlans:
-                deleted_vlans.add(vid)
+        curr_vlans = frozenset(self.vlans.keys())
+        new_vlans = frozenset(new_dp.vlans.keys())
+        deleted_vlans = curr_vlans - new_vlans
 
         changed_vlans = set([])
-        for vid, new_vlan in list(new_dp.vlans.items()):
+        for vid, new_vlan in new_dp.vlans.items():
             if vid not in self.vlans:
                 changed_vlans.add(vid)
                 logger.info('VLAN %s added' % vid)
@@ -957,11 +1220,13 @@ configuration.
                 changed_ports (set): changed/added port numbers.
                 changed_acl_ports (set): changed ACL only port numbers.
         """
+        curr_ports = frozenset(self.ports.keys())
+        new_ports = frozenset(new_dp.ports.keys())
         all_ports_changed = False
         changed_ports = set([])
         changed_acl_ports = set([])
 
-        for port_no, new_port in list(new_dp.ports.items()):
+        for port_no, new_port in new_dp.ports.items():
             if port_no not in self.ports:
                 # Detected a newly configured port
                 changed_ports.add(port_no)
@@ -985,7 +1250,7 @@ configuration.
                     else:
                         changed_ports.add(port_no)
                         logger.info('port %s reconfigured (%s)' % (
-                            port_no, diff(old_port.to_conf(), new_port.to_conf(), context=1)))
+                            port_no, old_port.conf_diff(new_port)))
                 elif new_port.acls_in:
                     port_acls_changed = [acl for acl in new_port.acls_in if acl in changed_acls]
                     if port_acls_changed:
@@ -995,14 +1260,14 @@ configuration.
 
         # TODO: optimize case where only VLAN ACL changed.
         for vid in changed_vlans:
-            for port in new_dp.vlans[vid].get_ports():
-                changed_ports.add(port.number)
+            changed_port_nums = [port.number for port in new_dp.vlans[vid].get_ports()]
+            changed_ports.update(changed_port_nums)
 
-        deleted_ports = set(list(self.ports.keys())) - set(list(new_dp.ports.keys()))
+        deleted_ports = curr_ports - new_ports
         if deleted_ports:
             logger.info('deleted ports: %s' % deleted_ports)
 
-        if changed_ports == set(new_dp.ports.keys()):
+        if changed_ports == new_ports:
             all_ports_changed = True
         elif (not changed_ports and
               not deleted_ports and
@@ -1030,7 +1295,7 @@ configuration.
         """
         def _table_configs(dp):
             return frozenset([
-                table.table_config for table in list(dp.tables.values())])
+                table.table_config for table in dp.tables.values()])
 
         if self.ignore_subconf(new_dp):
             logger.info('DP base level config changed - requires cold start')

@@ -86,16 +86,15 @@ class FakeOFTable:
             # entries which will cause ambiguous behaviour. This is
             # obviously unnacceptable so we will assume this is
             # always set
-            add = True
             for fte in table:
                 if flowmod.fte_matches(fte, strict=True):
                     table.remove(fte)
                     break
                 elif flowmod.overlaps(fte):
-                    add = False
-                    break
-            if add:
-                table.append(flowmod)
+                    raise FakeOFTableException(
+                        'Overlapping flowmods {} and {}'.format(
+                            flowmod, fte))
+            table.append(flowmod)
 
         def _del(table, flowmod):
             removals = [fte for fte in table if flowmod.fte_matches(fte)]
@@ -205,7 +204,13 @@ class FakeOFTable:
                         for action in instruction.actions:
                             if action.type == ofp.OFPAT_SET_FIELD:
                                 packet_dict[action.key] = action.value
-        return instructions
+                    elif instruction.type == ofp.OFPIT_WRITE_METADATA:
+                        metadata = packet_dict.get('metadata', 0)
+                        mask = instruction.metadata_mask
+                        mask_compl = mask ^ 0xFFFFFFFFFFFFFFFF
+                        packet_dict['metadata'] = (metadata & mask_compl)\
+                            | (instruction.metadata & mask)
+        return (instructions, packet_dict)
 
     def is_output(self, match, port=None, vid=None):
         """Return true if packets with match fields is output to port with
@@ -250,7 +255,7 @@ class FakeOFTable:
         vid_stack = []
         if match_vid & ofp.OFPVID_PRESENT != 0:
             vid_stack.append(match_vid)
-        instructions = self.lookup(match)
+        instructions, _ = self.lookup(match)
 
         for instruction in instructions:
             if instruction.type != ofp.OFPIT_APPLY_ACTIONS:
@@ -277,6 +282,18 @@ class FakeOFTable:
                                 if output_result is not None:
                                     return output_result
         return False
+
+    def apply_instructions_to_packet(self, match):
+        """
+        Send packet through the fake OF table pipeline
+        Args:
+            match (dict): A dict keyed by header fields with values, represents a packet
+        Returns:
+            dict: Modified match dict, represents packet that has been through the pipeline \
+                with values possibly altered
+        """
+        _, packet_dict = self.lookup(match)
+        return packet_dict
 
     def __str__(self):
         string = ''
@@ -305,6 +322,7 @@ class FlowMod:
         """flowmod is a ryu flow modification message object"""
         self.priority = flowmod.priority
         self.instructions = flowmod.instructions
+        self.validate_instructions()
         self.match_values = {}
         self.match_masks = {}
         self.out_port = None
@@ -322,6 +340,15 @@ class FlowMod:
             val = self.match_to_bits(key, val) & mask
             self.match_values[key] = val
             self.match_masks[key] = mask
+
+    def validate_instructions(self):
+        instruction_types = set()
+        for instruction in self.instructions:
+            if instruction.type in instruction_types:
+                raise FakeOFTableException(
+                    'FlowMod with Multiple instructions of the '
+                    'same type: {}'.format(self.instructions))
+            instruction_types.add(instruction.type)
 
     def out_port_matches(self, other):
         """returns True if other has an output action to this flowmods

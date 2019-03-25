@@ -26,14 +26,20 @@ from faucet.faucet_pipeline import ValveTableConfig
 class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attributes
     """Wrapper for an OpenFlow table."""
 
-    def __init__(self, table_id, name, table_config,
-                 flow_cookie, notify_flow_removed=False):
-        self.table_id = table_id
+    def __init__(self, name, table_config,
+                 flow_cookie, notify_flow_removed=False, next_tables=None):
         self.name = name
         self.table_config = table_config
+        self.table_id = self.table_config.table_id
         self.set_fields = self.table_config.set_fields
         self.exact_match = self.table_config.exact_match
         self.match_types = None
+        self.metadata_match = self.table_config.metadata_match
+        self.metadata_write = self.table_config.metadata_write
+        if next_tables:
+            self.next_tables = next_tables
+        else:
+            self.next_tables = []
         if self.table_config.match_types:
             self.match_types = {}
             for field, mask in self.table_config.match_types:
@@ -41,18 +47,53 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
         self.flow_cookie = flow_cookie
         self.notify_flow_removed = notify_flow_removed
 
-    # TODO: verify set_fields
+    def goto(self, next_table):
+        """Add goto next table instruction."""
+        assert next_table.name in self.table_config.next_tables, (
+            '%s not configured as next table in %s' % (
+                next_table.name, self.name))
+        return valve_of.goto_table(next_table)
+
+    def goto_this(self):
+        return valve_of.goto_table(self)
+
+    def goto_miss(self, next_table):
+        """Add miss goto table instruction."""
+        assert next_table.name == self.table_config.miss_goto, (
+            '%s not configured as miss table in %s' % (
+                next_table.name, self.name))
+        return valve_of.goto_table(next_table)
+
+    def set_field(self, **kwds):
+        """Return set field action."""
+        for field in kwds.keys():
+            assert (self.table_id == valve_of.ofp.OFPTT_ALL or
+                    (self.set_fields and field in self.set_fields)), (
+                        '%s not configured as set field in %s' % (field, self.name))
+        return valve_of.set_field(**kwds)
+
+    def set_vlan_vid(self, vlan_vid):
+        """Set VLAN VID with VID_PRESENT flag set.
+
+        Args:
+            vid (int): VLAN VID
+        Returns:
+            ryu.ofproto.ofproto_v1_3_parser.OFPActionSetField: set VID with VID_PRESENT.
+        """
+        return self.set_field(vlan_vid=valve_of.vid_present(vlan_vid))
+
     # TODO: verify actions
-    def match(self, in_port=None, vlan=None, # pylint: disable=too-many-arguments
-              eth_type=None, eth_src=None,
-              eth_dst=None, eth_dst_mask=None,
-              icmpv6_type=None,
-              nw_proto=None, nw_dst=None):
+    @staticmethod
+    def match(in_port=None, vlan=None, # pylint: disable=too-many-arguments
+              eth_type=None, eth_src=None, eth_dst=None, eth_dst_mask=None,
+              icmpv6_type=None, nw_proto=None, nw_dst=None, metadata=None,
+              metadata_mask=None, vlan_pcp=None):
         """Compose an OpenFlow match rule."""
         match_dict = valve_of.build_match_dict(
             in_port, vlan, eth_type, eth_src,
             eth_dst, eth_dst_mask, icmpv6_type,
-            nw_proto, nw_dst)
+            nw_proto, nw_dst, metadata, metadata_mask,
+            vlan_pcp)
         return valve_of.match(match_dict)
 
     def _verify_flowmod(self, flowmod):
@@ -62,7 +103,7 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
             assert not flowmod.match.items(), (
                 'default flow cannot have matches')
         elif self.match_types:
-            match_fields = list(flowmod.match.items())
+            match_fields = flowmod.match.items()
             for match_type, match_field in match_fields:
                 assert match_type in self.match_types, (
                     '%s match in table %s' % (match_type, self.name))
@@ -111,13 +152,9 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
         command = valve_of.ofp.OFPFC_DELETE
         if strict:
             command = valve_of.ofp.OFPFC_DELETE_STRICT
-        return [
-            self.flowmod(
-                match=match,
-                priority=priority,
-                command=command,
-                out_port=out_port,
-                out_group=valve_of.ofp.OFPG_ANY)]
+        return self.flowmod(
+            match=match, priority=priority, command=command,
+            out_port=out_port, out_group=valve_of.ofp.OFPG_ANY)
 
     def flowdrop(self, match=None, priority=None, hard_timeout=0):
         """Add drop matching flow to a table."""
@@ -203,5 +240,6 @@ class ValveGroupTable:
         self.entries = {}
         return valve_of.groupdel()
 
+
 wildcard_table = ValveTable(
-    valve_of.ofp.OFPTT_ALL, 'all', ValveTableConfig('all'), flow_cookie=0)
+    'all', ValveTableConfig('all', valve_of.ofp.OFPTT_ALL), flow_cookie=0)

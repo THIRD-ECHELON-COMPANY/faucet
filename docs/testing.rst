@@ -24,7 +24,10 @@ Then you can build and run the mininet tests from the docker entry-point:
   sudo docker build --pull -t faucet/tests -f Dockerfile.tests .
   sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.tcpdump
   sudo modprobe openvswitch
-  sudo docker run --sysctl net.ipv6.conf.all.disable_ipv6=0 --privileged -v $HOME/.cache/pip:/var/tmp/pip-cache -ti faucet/tests
+  sudo docker run --sysctl net.ipv6.conf.all.disable_ipv6=0 --privileged --rm \
+                  -v /var/local/lib/docker:/var/lib/docker \
+                  -v $HOME/.cache/pip:/var/tmp/pip-cache \
+                  -ti faucet/tests
 
 The apparmor command is currently required on Ubuntu hosts to allow the use of
 tcpdump inside the container.
@@ -92,16 +95,31 @@ to the dataplane, and one for the CPN for OpenFlow. You will need to assign
 an IP address to the CPN interface on the host, and configure the switch
 with a CPN IP address and establish that they can reach each other (eg via ping).
 
-NOTE: it is very important to disable any process that cause any traffic
-on the dataplane test interfaces, as this may interfere with the tests.
-For example, the test interfaces should have all IPv4/IPv6 dynamic
-address assignment disabled. To achieve this, on Ubuntu for example, you
-can set the interfaces to "unmanaged" in Network Manager, and make sure
-processes like `Avahi <http://manpages.ubuntu.com/manpages/xenial/en/man5/avahi-daemon.conf.5.html>`_ ignores those interfaces.
-
 You will need to configure the switch with two OpenFlow controllers, both
 with the host's CPN IP address, but with different ports (defaults are given
 below for *of_port* and *gauge_of_port*).
+
+  .. note::
+     It is very important to disable any process that could cause any
+     traffic on the dataplane test interfaces, and the test interfaces
+     should have all IPv4/IPv6 dynamic address assignment disabled.
+     To achieve this, on Ubuntu for example, you can set the interfaces
+     to "unmanaged" in Network Manager, and make sure processes like
+     `Avahi <http://manpages.ubuntu.com/manpages/xenial/en/man5/avahi-daemon.conf.5.html>`_
+     ignores the test interfaces.
+
+  .. note::
+     Hardware tests must not be run from virtualized hosts (such as under
+     VMware). The tests need to control physical port status, and need
+     low level L2 packet access (eg. to rewrite Ethernet source and
+     destination addresses) which virtualization may interfere with.
+
+  .. note::
+     Hardware tests require the test switch to have all non-OpenFlow
+     switching/other features (eg. RSTP, DHCP) disabled on the
+     dataplane test interfaces. These features will conflict with
+     the functions FAUCET itself provides (and in turn the tests).
+
 
 It is assumed that you execute all following commands from your FAUCET
 source code directory (eg one you have git cloned).
@@ -124,9 +142,6 @@ switch:
   hw_switch: True
   hardware: 'Open vSwitch'
   # Map ports on the hardware switch, to physical ports on this machine.
-  # If using a switch with less than 4 dataplane ports available, run
-  # FaucetZodiac tests only. A 4th port must still be defined here and
-  # must exist, but will not be used.
   dp_ports:
     1: enp1s0f0
     2: enp1s0f1
@@ -154,16 +169,34 @@ switch:
 Running the tests
 ~~~~~~~~~~~~~~~~~
 
+Before starting the hardware test suite for the first time, you will need to
+install ebtables on the host machine:
+
 .. code:: console
 
-  docker build --pull -t faucet/tests -f Dockerfile.tests .
-  apparmor_parser -R /etc/apparmor.d/usr.sbin.tcpdump
-  modprobe openvswitch
-  sudo docker run --privileged --net=host \
-      -v $HOME/.cache/pip:/var/tmp/pip-cache \
-      -v /etc/faucet:/etc/faucet \
-      -v /var/tmp:/var/tmp \
-      -ti faucet/tests
+  sudo apt-get install ebtables
+
+After every reboot of your host machine you will also need to manually load the
+``openvswitch`` and ``ebtables`` kernel modules. If using apparmor you will also
+need to disable the profile for tcpdump:
+
+.. code:: console
+
+  sudo modprobe openvswitch
+  sudo modprobe ebtables
+  sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.tcpdump
+
+Then you can build and run the test suite:
+
+.. code:: console
+
+  sudo docker build --pull -t faucet/tests -f Dockerfile.tests .
+  sudo docker run --privileged --rm --net=host --cap-add=NET_ADMIN \
+                  -v /var/local/lib/docker:/var/lib/docker \
+                  -v $HOME/.cache/pip:/var/tmp/pip-cache \
+                  -v /etc/faucet:/etc/faucet \
+                  -v /var/tmp:/var/tmp \
+                  -ti faucet/tests
 
 Test suite options
 ------------------

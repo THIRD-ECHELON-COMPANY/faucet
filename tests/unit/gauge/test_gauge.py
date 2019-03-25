@@ -36,24 +36,31 @@ class QuietHandler(BaseHTTPRequestHandler):
         pass
 
 
-def table_by_id(i):
-    table = mock.Mock()
-    table_name = mock.PropertyMock(return_value='table' + str(i))
-    type(table).name = table_name
-    return table
-
-
 def create_mock_datapath(num_ports):
     """Mock a datapath by creating mocked datapath ports."""
+
+    dp_id = random.randint(1, 5000)
+    dp_name = mock.PropertyMock(return_value='datapath')
+
+    def table_by_id(i):
+        table = mock.Mock()
+        table_name = mock.PropertyMock(return_value='table' + str(i))
+        type(table).name = table_name
+        return table
+
+    def port_labels(port_no):
+        return {
+            'port': 'port%u' % port_no, 'port_description': 'port%u' % port_no,
+            'dp_id': hex(dp_id), 'dp_name': dp_name}
+
     ports = {}
     for i in range(1, num_ports + 1):
         port = mock.Mock()
         port_name = mock.PropertyMock(return_value='port' + str(i))
         type(port).name = port_name
         ports[i] = port
-    datapath = mock.Mock(ports=ports, dp_id=random.randint(1, 5000))
-    datapath.table_by_id = table_by_id
-    dp_name = mock.PropertyMock(return_value='datapath')
+
+    datapath = mock.Mock(ports=ports, dp_id=dp_id, port_labels=port_labels, table_by_id=table_by_id)
     type(datapath).name = dp_name
     return datapath
 
@@ -237,15 +244,15 @@ class GaugePrometheusTests(unittest.TestCase): # pytype: disable=module-attr
             labels = line[index + 1:line.find('}')].split(',')
 
             for label in labels:
-                lab_name, lab_val = label.split('=')
+                lab_name, lab_val = label.split('=', 1)
                 lab_val = lab_val.replace('"', '')
                 if lab_name == 'dp_id':
                     dp_id = int(lab_val, 16)
-                elif lab_name == 'port_name':
+                elif lab_name == 'port':
                     port_name = lab_val
 
             key = (dp_id, port_name)
-            stat_val = line.split(' ')[1]
+            stat_val = line.split(' ')[-1]
             if key not in parsed_output:
                 parsed_output[key] = []
 
@@ -555,7 +562,7 @@ class GaugeInfluxUpdateTest(unittest.TestCase): # pytype: disable=module-attr
             measurement, influx_data = self.parse_influx_output(line)
 
             # get the number at the end of the port_name
-            port_num = int(influx_data['port_name'][-1]) # pytype: disable=unsupported-operands
+            port_num = influx_data['port_name'] # pytype: disable=unsupported-operands
             # get the original port stat value
             port_stat_val = logger_to_ofp(
                 msg.body[port_num - 1])[measurement] # pytype: disable=unsupported-operands
@@ -838,7 +845,7 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
         logger.update(time.time(), datapath.dp_id, msg)
         log_str = self.get_file_contents()
 
-        yaml_dict = yaml.load(log_str)['msg']['OFPFlowStatsReply']['body'][0]['OFPFlowStats']
+        yaml_dict = yaml.safe_load(log_str)['msg']['OFPFlowStatsReply']['body'][0]['OFPFlowStats']
 
         compare_flow_msg(msg, yaml_dict, self)
 
@@ -870,7 +877,7 @@ class RyuAppSmokeTest(unittest.TestCase): # pytype: disable=module-attr
         ryu_app.reload_config(None)
         self.assertFalse(ryu_app._config_files_changed())
         ryu_app._update_watcher(None, self._fake_event())
-        ryu_app._start_watchers(self._fake_dp(), {})
+        ryu_app._start_watchers(self._fake_dp(), {}, time.time())
         for event_handler in (
                 ryu_app._datapath_connect,
                 ryu_app._datapath_disconnect):

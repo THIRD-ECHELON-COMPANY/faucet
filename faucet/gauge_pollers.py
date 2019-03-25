@@ -33,6 +33,7 @@ class GaugePoller:
         self.conf = conf
         self.prom_client = prom_client
         self.reply_pending = False
+        self.ryudp = None
         self.logger = logging.getLogger(
             logname + '.{0}'.format(self.conf.type)
             )
@@ -58,9 +59,9 @@ class GaugePoller:
         """Return True if the poller is running."""
         return self._running
 
-    def is_active(self):
-        """Return True if the poller is controlling the requiest loop for its
-        stat"""
+    @staticmethod
+    def is_active():
+        """Return True if the poller is controlling the request loop for its stat"""
         return False
 
     def send_req(self):
@@ -97,17 +98,6 @@ class GaugePoller:
         # TODO: this should be implemented by subclasses instead of having a
         # super call to update
         pass
-
-    def _stat_port_name(self, msg, stat, dp_id):
-        """Return port name as string based on port number."""
-        if stat.port_no == msg.datapath.ofproto.OFPP_CONTROLLER:
-            return 'CONTROLLER'
-        if stat.port_no == msg.datapath.ofproto.OFPP_LOCAL:
-            return 'LOCAL'
-        if stat.port_no in self.dp.ports:
-            return self.dp.ports[stat.port_no].name
-        self.logger.debug('stats for unknown port %u', stat.port_no)
-        return str(stat.port_no)
 
     @staticmethod
     def _format_port_stats(delim, stat):
@@ -152,6 +142,7 @@ class GaugeThreadPoller(GaugePoller):
         self._running = True
         if active:
             self.thread = hub.spawn(self)
+            self.thread.name = 'GaugeThreadPoller'
 
     def stop(self):
         super(GaugeThreadPoller, self).stop()
@@ -243,11 +234,10 @@ class GaugeFlowTablePoller(GaugeThreadPoller):
             oxm_tlv = oxm_match['OXMTlv']
             mask = oxm_tlv['mask']
             val = oxm_tlv['value']
-            field = oxm_tlv['field']
+            orig_field = oxm_tlv['field']
             if mask is not None:
                 val = '/'.join((str(val), str(mask)))
-            if field in OLD_MATCH_FIELDS:
-                field = OLD_MATCH_FIELDS[field]
+            field = OLD_MATCH_FIELDS.get(orig_field, orig_field)
             tags[field] = val
             if field == 'vlan_vid' and mask is None:
                 tags['vlan'] = devid_present(int(val))

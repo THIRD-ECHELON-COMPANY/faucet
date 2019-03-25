@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# TODO: until 3.6 safe, force 3.5
-PYV="3.5"
 FAUCETHOME=`dirname $0`"/../.."
-PYTHONPATH=$FAUCETHOME:$FAUCETHOME/faucet:$FAUCETHOME/clib
-PARARGS="parallel --delay 1 --bar"
+TMPDIR=`mktemp -d -p /var/tmp`
+CONFIG="$FAUCETHOME/setup.cfg"
+PARARGS="parallel --delay 1 --bar --halt now,fail=1 -j 2"
 PYTYPE=`which pytype`
-PYTYPEARGS="python$PYV  $PYTYPE --pythonpath $PYTHONPATH -d pyi-error,import-error -V$PYV"
+PYTYPEARGS="python3 $PYTYPE --config $CONFIG -o $TMPDIR/{/} {}"
 PYHEADER=`head -1 $PYTYPE`
-SRCFILES="$FAUCETHOME/tests/codecheck/src_files.sh"
+SRCFILES="$FAUCETHOME/tests/codecheck/src_files.sh $*"
 echo "Using $PYTYPE (header $PYHEADER)"
 
 $SRCFILES | shuf | $PARARGS $PYTYPEARGS || exit 1
+rm -rf $TMPDIR

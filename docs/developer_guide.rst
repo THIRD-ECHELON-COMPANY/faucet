@@ -7,22 +7,63 @@ testing and style.
 Before submitting a PR
 ----------------------
 
--  All unit and integration tests must pass (please use the docker based tests; see
-   :ref:`docker-sw-testing`).
+-  If you have general questions, feel free to reach out to the faucet-dev mailing list.
+-  If you are new to FAUCET, or are contemplating a major change, it's recommended to
+   open a github issue with the proposed change. This will enable broad understanding of
+   your work including being able to catch any potential snags very early (for example,
+   adding new dependencies). Architectural and approach questions are best
+   settled at this stage before any code is written.
+-  Please send relatively small, tightly scoped PRs (approx 200-300 LOC or less).
+   This makes review and analysis easier and lowers risk, including risk of merge
+   conflicts with other PRs. Larger changes must be refactored into incremental changes.
 -  You must add a test if FAUCET's functionality changes (ie. a new
    feature, or correcting a bug).
+-  All unit and integration tests must pass (please use the docker based tests; see
+   :ref:`docker-sw-testing`). Where hardware is available, please also run the hardware
+   based integration tests also.
+-  In order to speed up acceptance of your PR we recommend enabling TravisCI on your
+   own github repo, and linking the test results in the body of the PR. This enables
+   the maintainers to quickly verify that your changes pass all tests in a pristine
+   environment while conserving our TravisCI resources on the main branch (by minimizing
+   resources used on potentially failing test runs which could be caught before opening
+   a PR on the main branch).
+-  You must use the github feature branches (see https://gist.github.com/vlandham/3b2b79c40bc7353ae95a),
+   for your change and squash commits (https://blog.github.com/2016-04-01-squash-your-commits/)
+   when creating the PR.
 -  Please use the supplied git pre-commit hook (see ``../git-hook/pre-commit``),
-   to automatically run the unit tests and pylint for you at git commit time.
--  Please enable TravisCI testing on your repo, which enables the maintainers
-   to quickly verify that your changes pass all tests in a pristine environment.
+   to automatically run the unit tests and pylint for you at git commit time,
+   which will save you TravisCI resources also.
 -  pylint must show no new errors or warnings.
 -  Code must conform to the style guide (see below).
+
+PR handling guidelines
+----------------------
+
+This section documents general guidelines for the maintainers in handling PRs.
+The overall intent is, to enable quality contributions with as low overhead as possible,
+maximizing the use of tools such as static analysis and unit/integration testing,
+and supporting rapid and safe advancement of the overall project.
+
+In addition to the above PR submission guidelines, above:
+
+-  PRs require a positive review per github's built in gating feature. The approving
+   reviewer executes the merge.
+-  PRs that should not be merged until some other criteria are met (e.g. not
+   until release day) must include DO NOT MERGE in the title, with the details
+   in PR comments.
+-  A typical PR review/adjust/merge cycle should be 2-3 days (timezones, weekends, etc
+   permitting). If a PR upon review appears too complex or requires further
+   discussion it is recommended it be refactored into smaller PRs or
+   discussed in another higher bandwidth forum (e.g. a VC) as appropriate.
+-  A PR can be submitted at any time, but to simplify release logistics PR merges
+   might not be done before release, on release days.
+
 
 Code style
 ----------
 
 Please use the coding style documented at
-http://google.github.io/styleguide/pyguide.html. Existing code not using
+https://github.com/google/styleguide/blob/gh-pages/pyguide.md. Existing code not using
 this style will be incrementally migrated to comply with it. New code
 should comply.
 
@@ -32,7 +73,11 @@ Faucet Development Environment
 A common way of developing faucet is inside a `virtualenv <https://virtualenv.pypa.io>`_
 with an IDE such as `PyCharm <https://www.jetbrains.com/pycharm/>`_.
 
-Instructions on setting up PyCharm for developing faucet are as follows:
+Instructions on setting up PyCharm for developing faucet are below.
+
+If you would rather develop on the command line directly, a short summary
+of the command line setup for development in a ``venv`` with Python 3.6+
+is included after the PyCharm instructions.
 
 Create a new project in PyCharm
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -100,6 +145,17 @@ Copy the sample gauge configuration file from
 ``/Dev/faucet/etc/faucet/gauge.yaml`` to ``/Dev/faucet/venv/etc/faucet/`` and
 edit this configuration file as necessary.
 
+If you are using the sample configuration "as is" you will also need to copy
+``/Dev/faucet/etc/faucet/acls.yaml`` to ``/Dev/faucet/venv/etc/faucet/`` as
+that included by the sample ``faucet.yaml`` file, and without it the sample
+``faucet.yaml`` file cannot be loaded.
+
+You may also wish to copy
+``/Dev/faucet/etc/faucet/ryu.conf`` to ``/Dev/faucet/venv/etc/faucet/`` as
+well so everything can be referenced in one directory inside the Python
+virtual environment.
+
+
 Configure PyCharm to run faucet and gauge
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -148,6 +204,78 @@ run configuration.
 Now that everything is setup you can run either the faucet controller, gauge
 controller and test suite from the ``Run`` menu.
 
+Developing with a Python 3.6+ venv
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you would prefer not to use PyCharm and are comfortable developing
+Python directly on the command line, these steps should get you started.
+They have been tested with Ubuntu 18.04 LTS, which includes Python 3.6,
+but similar instructions should work on other platforms that include
+Python 3.6+.
+
+Install C/C++ compilers and Python development environment packages:
+
+    .. code:: console
+
+       sudo apt-get install python3-venv libpython3.6-dev gcc g++ make
+
+If you have not already, clone the faucet git repository:
+
+    .. code:: console
+
+       git clone https://github.com/faucetsdn/faucet.git
+
+Then create a Python ``venv`` environment within it:
+
+    .. code:: console
+
+       cd faucet
+       python3 -m venv "${PWD}/venv"
+
+and activate that virtual environment for all following steps:
+
+    .. code:: console
+
+       . venv/bin/activate
+
+Ensure that the faucet config is present within the virtual environment,
+copying from the default config files if required:
+
+    .. code:: console
+
+       mkdir -p "${VIRTUAL_ENV}/var/log/faucet"
+       mkdir -p "${VIRTUAL_ENV}/etc/faucet"
+
+       for FILE in {acls,faucet,gauge}.yaml ryu.conf; do
+         if [ -f "${VIRTUAL_ENV}/etc/faucet/${FILE}" ]; then
+           echo "Preserving existing ${FILE}"
+         else
+           echo "Installing template ${FILE}"
+           cp -p "etc/faucet/${FILE}" "${VIRTUAL_ENV}/etc/faucet/${FILE}"
+         fi
+       done
+
+Then install the runtime and development requirements
+
+    .. code:: console
+
+       "${VIRTUAL_ENV}/bin/pip3" install wheel   # For bdist_wheel targets
+       "${VIRTUAL_ENV}/bin/pip3" install -r "${VIRTUAL_ENV}/../test-requirements.txt"
+
+Finally install faucet in an editable form:
+
+    .. code:: console
+
+       pip install -e .
+
+And then confirm that you can run the unit tests:
+
+    .. code:: console
+
+       pytest tests/unit/faucet/
+       pytest tests/unit/gauge/
+
+
 Makefile
 --------
 
@@ -166,6 +294,31 @@ To *directly install* faucet from the cloned git repo, you could use ``sudo pyth
 To *build pip installable package*, you could use ``python setup.py sdist`` command from the root of the directory.
 
 To *remove* any temporarily created directories and files, you could use ``rm -rf dist *egg-info`` command.
+
+
+Building Documentation
+~~~~~~~~~~~~~~~~~~~~~~
+
+The documentation is built with Sphinx, from within the ``docs`` directory.
+
+To be able to build the documentation ensure you have the relevant packages
+installed:
+
+    .. code:: console
+
+       cd docs
+       sudo apt-get install librsvg2-bin make
+       pip3 install -r requirements.txt
+
+and then you can build HTML documentation with:
+
+    .. code:: console
+
+       cd docs
+       make html
+
+and the documentation will be found under ``_build/html`` in the ``docs``
+directory.
 
 
 Key architectural concepts/assumptions:

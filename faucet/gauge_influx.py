@@ -51,7 +51,7 @@ class InfluxShipper:
                     self.logger.warning('%s failed to update InfluxDB' % self.ship_error_prefix)
                     return False
             except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout,
-                       InfluxDBClientError, InfluxDBServerError) as err:
+                    InfluxDBClientError, InfluxDBServerError) as err:
                 self.logger.warning('%s %s' % (self.ship_error_prefix, err))
                 return False
             return True
@@ -160,7 +160,7 @@ Example:
         super(GaugePortStatsInfluxDBLogger, self).update(rcv_time, dp_id, msg)
         points = []
         for stat in msg.body:
-            port_name = self._stat_port_name(msg, stat, dp_id)
+            port_name = str(stat.port_no)
             for stat_name, stat_val in self._format_port_stats('_', stat):
                 points.append(
                     self.make_port_point(

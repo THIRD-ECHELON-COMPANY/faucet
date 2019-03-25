@@ -51,11 +51,17 @@ class Port(Conf):
         'max_hosts': 255,
         # maximum number of hosts
         'hairpin': False,
-        # if True, then switch between hosts on this port (eg WiFi radio).
+        # if True, then switch unicast and flood between hosts on this port (eg WiFi radio).
+        'hairpin_unicast': False,
+        # if True, then switch unicast between hosts on this port (eg WiFi radio).
         'lacp': 0,
         # if non 0 (LAG ID), experimental LACP support enabled on this port.
+        'lacp_active': False,
+        # experimental active LACP
         'loop_protect': False,
-        # if True, do simple loop protection on this port.
+        # if True, do simple (host/access port) loop protection on this port.
+        'loop_protect_external': False,
+        # if True, do external (other switch) loop protection on this port.
         'output_only': False,
         # if True, all packets input from this port are dropped.
         'lldp_beacon': {},
@@ -87,14 +93,18 @@ class Port(Conf):
         'stack': dict,
         'max_hosts': int,
         'hairpin': bool,
+        'hairpin_unicast': bool,
         'lacp': int,
+        'lacp_active': bool,
         'loop_protect': bool,
+        'loop_protect_external': bool,
         'output_only': bool,
         'lldp_beacon': dict,
         'opstatus_reconf': bool,
         'receive_lldp': bool,
         'override_output_port': (str, int),
         'dot1x': bool,
+        'max_lldp_lost': int,
     }
 
     stack_defaults_types = {
@@ -123,8 +133,11 @@ class Port(Conf):
         self.dp_id = None
         self.enabled = None
         self.hairpin = None
+        self.hairpin_unicast = None
         self.lacp = None
+        self.lacp_active = None
         self.loop_protect = None
+        self.loop_protect_external = None
         self.max_hosts = None
         self.max_lldp_lost = None
         self.mirror = None
@@ -137,7 +150,7 @@ class Port(Conf):
         self.override_output_port = None
         self.permanent_learn = None
         self.receive_lldp = None
-        self.stack = None
+        self.stack = {}
         self.unicast_flood = None
 
         self.dyn_lacp_up = None
@@ -147,9 +160,7 @@ class Port(Conf):
         self.dyn_last_lldp_beacon_time = None
         self.dyn_learn_ban_count = 0
         self.dyn_phys_up = False
-        self.dyn_phys_up = False
         self.dyn_stack_current_state = STACK_STATE_DOWN
-        self.dyn_stack_probe_info = None
         self.dyn_stack_probe_info = {}
 
         self.tagged_vlans = []
@@ -177,6 +188,12 @@ class Port(Conf):
         super(Port, self).check_config()
         test_config_condition(not (isinstance(self.number, int) and self.number > 0 and (
             not valve_of.ignore_port(self.number))), ('Port number invalid: %s' % self.number))
+        test_config_condition(
+            self.hairpin and self.hairpin_unicast,
+            'Cannot have both hairpin and hairpin_unicast enabled')
+        if self.dot1x:
+            test_config_condition(self.number > 65535, (
+                '802.1x not supported on ports > 65535'))
         if self.mirror:
             test_config_condition(self.tagged_vlans or self.native_vlan, (
                 'mirror port %s cannot have any VLANs assigned' % self))
@@ -185,6 +202,11 @@ class Port(Conf):
             for stack_config in list(self.stack_defaults_types.keys()):
                 test_config_condition(stack_config not in self.stack, (
                     'stack %s must be defined' % stack_config))
+            # LLDP always enabled for stack ports.
+            self.receive_lldp = True
+            if not self.lldp_beacon_enabled():
+                self.lldp_beacon.update({'enable': True})
+
         if self.lldp_beacon:
             self._check_conf_types(
                 self.lldp_beacon, self.lldp_beacon_defaults_types)
@@ -234,18 +256,6 @@ class Port(Conf):
     def running(self):
         """Return True if port enabled and up."""
         return self.enabled and self.dyn_phys_up
-
-    def to_conf(self):
-        result = super(Port, self).to_conf()
-        if result is not None:
-            if 'stack' in result and result['stack'] is not None:
-                result['stack'] = {}
-                for stack_config in list(self.stack_defaults_types.keys()):
-                    result['stack'][stack_config] = self.stack[stack_config]
-            if self.native_vlan is not None:
-                result['native_vlan'] = self.native_vlan.name
-            result['tagged_vlans'] = [vlan.name for vlan in self.tagged_vlans]
-        return result
 
     def vlans(self):
         """Return all VLANs this port is in."""

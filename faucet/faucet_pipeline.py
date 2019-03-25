@@ -16,14 +16,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from faucet.faucet_metadata import EGRESS_METADATA_MASK
+
+STACK_LOOP_PROTECT_FIELD = 'vlan_pcp'
+
 
 class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instance-attributes
     """Configuration for a single table."""
 
-    def __init__(self, name, exact_match=None, meter=None, output=True, # pylint: disable=too-many-arguments
-                 miss_goto=None, size=None, match_types=None, set_fields=None, dec_ttl=None,
-                 vlan_port_scale=None):
+    def __init__(self, name, table_id, # pylint: disable=too-many-arguments
+                 exact_match=None, meter=None, output=True, miss_goto=None,
+                 size=None, match_types=None, set_fields=None, dec_ttl=None,
+                 vlan_port_scale=None, next_tables=None, metadata_match=0,
+                 metadata_write=0):
         self.name = name
+        self.table_id = table_id
         self.exact_match = exact_match
         self.meter = meter
         self.output = output
@@ -33,10 +40,19 @@ class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instan
         self.set_fields = set_fields
         self.dec_ttl = dec_ttl
         self.vlan_port_scale = vlan_port_scale
+        self.metadata_match = metadata_match
+        self.metadata_write = metadata_write
+        if next_tables:
+            assert isinstance(next_tables, (list, tuple))
+            self.next_tables = next_tables
+        else:
+            self.next_tables = ()
 
     def __str__(self):
         field_strs = ' '.join([
-            '%s: %s' % (key, val) for key, val in sorted(self.__dict__.items())])
+            '%s: %s' % (key, val)
+            for key, val in sorted(self.__dict__.items())
+            if val])
         return 'table config %s' % field_strs
 
     def __repr__(self):
@@ -52,49 +68,128 @@ class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instan
         return self.__hash__() < other.__hash__()
 
 
-def _fib_table(ipv):
+_NEXT_ETH = ('eth_dst_hairpin', 'eth_dst', 'flood')
+_NEXT_VIP = ('vip',) + _NEXT_ETH
+
+
+def _fib_table(ipv, table_id):
     return ValveTableConfig(
         'ipv%u_fib' % ipv,
+        table_id,
         match_types=(('eth_type', False), ('ipv%u_dst' % ipv, True), ('vlan_vid', False)),
         set_fields=('eth_dst', 'eth_src', 'vlan_vid'),
         dec_ttl=True,
-        vlan_port_scale=3.1)
+        vlan_port_scale=3.1,
+        next_tables=_NEXT_VIP
+        )
 
+PORT_ACL_DEFAULT_CONFIG = ValveTableConfig(
+    'port_acl',
+    0,
+    match_types=(('in_port', False),),
+    next_tables=(('vlan',) + _NEXT_VIP)
+    )
+VLAN_DEFAULT_CONFIG = ValveTableConfig(
+    'vlan',
+    PORT_ACL_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('eth_dst', True), ('eth_type', False),
+                 ('in_port', False), ('vlan_vid', False)),
+    set_fields=('vlan_vid',),
+    vlan_port_scale=1.5,
+    next_tables=('vlan_acl', 'classification', 'eth_src')
+    )
+VLAN_ACL_DEFAULT_CONFIG = ValveTableConfig(
+    'vlan_acl',
+    VLAN_DEFAULT_CONFIG.table_id + 1,
+    next_tables=(('classification', 'eth_src') + _NEXT_ETH))
+CLASSIFICATION_DEFAULT_CONFIG = ValveTableConfig(
+    'classification',
+    VLAN_ACL_DEFAULT_CONFIG.table_id + 1,
+    miss_goto='eth_src',
+    next_tables=(('eth_src', 'ipv4_fib', 'ipv6_fib') + _NEXT_VIP)
+    )
+ETH_SRC_DEFAULT_CONFIG = ValveTableConfig(
+    'eth_src',
+    CLASSIFICATION_DEFAULT_CONFIG.table_id + 1,
+    miss_goto='eth_dst',
+    next_tables=(('ipv4_fib', 'ipv6_fib') + _NEXT_VIP),
+    match_types=(('eth_dst', True), ('eth_src', False), ('eth_type', False),
+                 ('in_port', False), ('vlan_vid', False)),
+    set_fields=('vlan_vid', 'eth_dst'),
+    vlan_port_scale=4.1,
+    )
+IPV4_FIB_DEFAULT_CONFIG = _fib_table(4, ETH_SRC_DEFAULT_CONFIG.table_id + 1)
+IPV6_FIB_DEFAULT_CONFIG = _fib_table(6, IPV4_FIB_DEFAULT_CONFIG.table_id + 1)
+VIP_DEFAULT_CONFIG = ValveTableConfig(
+    'vip',
+    IPV6_FIB_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('arp_tpa', False), ('eth_dst', False), ('eth_type', False),
+                 ('icmpv6_type', False), ('ip_proto', False)),
+    next_tables=_NEXT_ETH,
+    )
+ETH_DST_HAIRPIN_DEFAULT_CONFIG = ValveTableConfig(
+    'eth_dst_hairpin',
+    VIP_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('in_port', False), ('eth_dst', False), ('vlan_vid', False)),
+    miss_goto='eth_dst',
+    exact_match=True,
+    vlan_port_scale=4.1,
+    )
+ETH_DST_DEFAULT_CONFIG = ValveTableConfig(
+    'eth_dst',
+    ETH_DST_HAIRPIN_DEFAULT_CONFIG.table_id + 1,
+    exact_match=True,
+    miss_goto='flood',
+    match_types=(('eth_dst', False), ('vlan_vid', False)),
+    next_tables=('egress',),
+    vlan_port_scale=4.1,
+    metadata_write=EGRESS_METADATA_MASK
+    )
+FLOOD_DEFAULT_CONFIG = ValveTableConfig(
+    'flood',
+    ETH_DST_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('eth_dst', True), ('in_port', False), ('vlan_vid', False)),
+    vlan_port_scale=2.1,
+    )
+EGRESS_DEFAULT_CONFIG = ValveTableConfig(
+    'egress',
+    FLOOD_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('metadata', True), ('vlan_vid', False)),
+    vlan_port_scale=1.5,
+    metadata_match=EGRESS_METADATA_MASK
+    )
+
+MINIMUM_FAUCET_PIPELINE_TABLES = {
+    'vlan', 'eth_src', 'eth_dst', 'flood'}
 
 # TODO: implement an eth_type table before VLAN. This would enable interception
-# of control protocols and simplify matches in vlan/eth_src, enabling use of exact_match.
+# of control protocols and simplify matches in vlan/eth_src, enabling use of
+# exact_match.
 FAUCET_PIPELINE = (
-    ValveTableConfig(
-        'port_acl'),
-    ValveTableConfig(
-        'vlan',
-        match_types=(('eth_dst', True), ('eth_type', False),
-                     ('in_port', False), ('vlan_vid', False)),
-        set_fields=('vlan_vid',),
-        vlan_port_scale=1.1),
-    ValveTableConfig(
-        'vlan_acl'),
-    ValveTableConfig(
-        'eth_src',
-        miss_goto='eth_dst',
-        match_types=(('eth_dst', True), ('eth_src', False), ('eth_type', False),
-                     ('in_port', False), ('vlan_vid', False)),
-        set_fields=('vlan_vid', 'eth_dst'),
-        vlan_port_scale=4.1),
-    _fib_table(4),
-    _fib_table(6),
-    ValveTableConfig(
-        'vip',
-        match_types=(('arp_tpa', False), ('eth_dst', False), ('eth_type', False),
-                     ('icmpv6_type', False), ('ip_proto', False))),
-    ValveTableConfig(
-        'eth_dst',
-        exact_match=True,
-        miss_goto='flood',
-        match_types=(('eth_dst', False), ('vlan_vid', False)),
-        vlan_port_scale=4.1),
-    ValveTableConfig(
-        'flood',
-        match_types=(('eth_dst', True), ('in_port', False), ('vlan_vid', False)),
-        vlan_port_scale=2.1),
+    PORT_ACL_DEFAULT_CONFIG,
+    VLAN_DEFAULT_CONFIG,
+    VLAN_ACL_DEFAULT_CONFIG,
+    CLASSIFICATION_DEFAULT_CONFIG,
+    ETH_SRC_DEFAULT_CONFIG,
+    IPV4_FIB_DEFAULT_CONFIG,
+    IPV6_FIB_DEFAULT_CONFIG,
+    VIP_DEFAULT_CONFIG,
+    ETH_DST_HAIRPIN_DEFAULT_CONFIG,
+    ETH_DST_DEFAULT_CONFIG,
+    FLOOD_DEFAULT_CONFIG,
+    EGRESS_DEFAULT_CONFIG
 )
+
+DEFAULT_CONFIGS = {
+    'port_acl': PORT_ACL_DEFAULT_CONFIG,
+    'vlan': VLAN_DEFAULT_CONFIG,
+    'vlan_acl': VLAN_ACL_DEFAULT_CONFIG,
+    'eth_src': ETH_SRC_DEFAULT_CONFIG,
+    'ipv4_fib': IPV4_FIB_DEFAULT_CONFIG,
+    'ipv6_fib': IPV6_FIB_DEFAULT_CONFIG,
+    'vip': VIP_DEFAULT_CONFIG,
+    'eth_dst_hairpin': ETH_DST_HAIRPIN_DEFAULT_CONFIG,
+    'eth_dst': ETH_DST_DEFAULT_CONFIG,
+    'flood': FLOOD_DEFAULT_CONFIG,
+    'egress': EGRESS_DEFAULT_CONFIG,
+}

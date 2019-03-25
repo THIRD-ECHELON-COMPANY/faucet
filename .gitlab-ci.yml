@@ -11,7 +11,7 @@ build-package:
     - mk-build-deps -i -r -t 'apt-get -f -y --force-yes'
     - export DEBEMAIL='maintainers@faucet.nz' && export DEBFULLNAME='Faucet Maintainers'
     - debchange --newversion ${CI_COMMIT_REF_NAME} -b "New upstream release"
-    - fakeroot debian/rules binary
+    - dpkg-buildpackage -b -us -uc -rfakeroot
     - mkdir built-packages || true
     - mv ../*.deb built-packages/
   artifacts:
@@ -26,16 +26,26 @@ deploy-package:
   image: faucet/dbuilder
   script:
     - cd built-packages/
-    - echo "{\"url\":\"https://packagecloud.io\",\"token\":\"$PACKAGECLOUD_TOKEN\"}" > ~/.packagecloud
-    - package_cloud push faucetsdn/faucet/debian/jessie *.deb || true
-    - package_cloud push faucetsdn/faucet/debian/stretch *.deb || true
-    - package_cloud push faucetsdn/faucet/debian/buster *.deb || true
-    - package_cloud push faucetsdn/faucet/raspbian/jessie *.deb || true
-    - package_cloud push faucetsdn/faucet/raspbian/stretch *.deb || true
-    - package_cloud push faucetsdn/faucet/raspbian/buster *.deb || true
-    - package_cloud push faucetsdn/faucet/ubuntu/xenial *.deb || true
-    - package_cloud push faucetsdn/faucet/ubuntu/artful *.deb || true
-    - package_cloud push faucetsdn/faucet/ubuntu/bionic *.deb || true
+    - ../gitlab/deploy_deb.sh
+  only:
+    - tags
+
+build-vm-image:
+  stage: build-image
+  image: faucet/dbuilder
+  script:
+    - cd images/vm/
+    - apt-get update && apt-get upgrade -y
+    - apt-get install -y locate python-pip qemu-utils kpartx squashfs-tools debootstrap procps wget sudo git
+    - wget http://ppa.launchpad.net/openstack-ci-core/vhd-util/ubuntu/pool/main/v/vhd-util/vhd-util_4.4.0-0ubuntu16_amd64.deb -O /tmp/vhd-util_4.4.0-0ubuntu16_amd64.deb
+    - dpkg -i /tmp/vhd-util_4.4.0-0ubuntu16_amd64.deb
+    - pip install diskimage-builder
+    - export container=docker
+    - ./build-faucet-vm.sh
+  artifacts:
+    paths:
+      - images/vm/faucet-amd64-*.qcow2*
+    expire_in: 1 week
   only:
     - tags
 
@@ -43,15 +53,16 @@ build-rpi-image:
   stage: build-image
   image: faucet/dbuilder
   script:
-    - cd raspbian-image/
+    - cd images/raspbian/
     - apt-get update && apt-get upgrade -y
-    - apt-get install quilt parted manpages-pl xxd qemu-user-static debootstrap zerofree pxz zip dosfstools bsdtar libcap2-bin grep rsync xz-utils binfmt-support -y
+    - apt-get install -y quilt parted manpages-pl xxd qemu-user-static debootstrap zerofree pxz zip dosfstools bsdtar libcap2-bin grep rsync xz-utils binfmt-support
     - git clone https://github.com/RPi-Distro/pi-gen.git
-    - mv prerun.sh pi-gen/export-image/
-    - mv common pi-gen/scripts/
-    - mv 02-run.sh pi-gen/stage2/01-sys-tweaks/
-    - mv build.sh pi-gen/
     - cd pi-gen
+    - git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+    - mv ../prerun.sh ./export-image/
+    - mv ../common ./scripts/
+    - mv ../02-run.sh ./stage2/01-sys-tweaks/
+    - mv ../build.sh ./
     - echo "IMG_NAME='faucet_${CI_COMMIT_REF_NAME}_raspbian'" > config
     - touch ./stage3/SKIP ./stage4/SKIP ./stage5/SKIP
     - touch ./stage4/SKIP_IMAGES ./stage5/SKIP_IMAGES
@@ -59,7 +70,7 @@ build-rpi-image:
     - ./build.sh
   artifacts:
     paths:
-      - raspbian-image/pi-gen/deploy/*
+      - images/raspbian/pi-gen/deploy/*
     expire_in: 1 week
   only:
     - tags

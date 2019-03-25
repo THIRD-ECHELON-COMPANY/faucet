@@ -22,6 +22,19 @@ import argparse
 import os
 import sys
 
+if sys.version_info < (3,):
+    raise ImportError("""You are trying to run faucet on python {py}
+
+Faucet is not compatible with python 2, please upgrade to python 3.5 or newer."""
+                      .format(py='.'.join([str(v) for v in sys.version_info[:3]])))
+elif sys.version_info < (3, 5):
+    raise ImportError("""You are trying to run faucet on python {py}
+
+Faucet 1.9.0 and above are no longer compatible with older versions of python 3.
+
+Please upgrade to python 3.5 or newer."""
+                      .format(py='.'.join([str(v) for v in sys.version_info[:3]])))
+
 RYU_OPTIONAL_ARGS = [
     ('ca-certs', 'CA certificates'),
     ('config-dir', """Path to a config directory to pull `*.conf` files
@@ -121,7 +134,7 @@ def build_ryu_args(argv):
     if args.verbose:
         ryu_args.append('--verbose')
 
-    for arg, val in list(vars(args).items()):
+    for arg, val in vars(args).items():
         if not val or not arg.startswith('ryu'):
             continue
         if arg == 'ryu_app':

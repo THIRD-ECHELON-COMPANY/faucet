@@ -12,18 +12,22 @@ def load_tables(dp, valve_cl): # pylint: disable=invalid-name
         table_attr = {
             'config': 3,
             'max_entries': valve_table.table_config.size,
-            'metadata_match': 0,
-            'metadata_write': 0,
+            'metadata_match': valve_table.metadata_match,
+            'metadata_write': valve_table.metadata_write,
             'name': valve_table.name.encode('utf-8'),
             'properties': [],
             'table_id': table_id,
         }
+        if valve_table.metadata_match:
+            table_attr.update({'metadata_match': valve_table.metadata_match})
+        if valve_table.metadata_write:
+            table_attr.update({'metadata_write': valve_table.metadata_write})
         new_table = valve_of.parser.OFPTableFeaturesStats(**table_attr)
         # Match types
         if valve_table.match_types:
             oxm_ids = [
                 valve_of.parser.OFPOxmId(type_=match_type, hasmask=hasmask)
-                for match_type, hasmask in list(valve_table.match_types.items())]
+                for match_type, hasmask in valve_table.match_types.items()]
             new_table.properties.append(
                 valve_of.parser.OFPTableFeaturePropOxm(
                     oxm_ids=oxm_ids, type_=valve_of.ofp.OFPTFPT_MATCH))
@@ -32,21 +36,17 @@ def load_tables(dp, valve_cl): # pylint: disable=invalid-name
                 new_table.properties.append(
                     valve_of.parser.OFPTableFeaturePropOxm(
                         oxm_ids=oxm_ids, type_=valve_of.ofp.OFPTFPT_WILDCARDS))
-        # Next tables
-        next_tables = [
-            table_id for table_id in active_table_ids if table_id > new_table.table_id]
-        if next_tables:
-            new_table.properties.append(
-                valve_of.parser.OFPTableFeaturePropNextTables(
-                    table_ids=next_tables, type_=valve_of.ofp.OFPTFPT_NEXT_TABLES))
-        # Instructions
         insts = set([valve_of.ofp.OFPIT_APPLY_ACTIONS])
-        if next_tables:
+        # Next tables
+        if valve_table.next_tables:
+            new_table.properties.append(valve_of.parser.OFPTableFeaturePropNextTables(
+                table_ids=valve_table.next_tables,
+                type_=valve_of.ofp.OFPTFPT_NEXT_TABLES))
             insts.add(valve_of.ofp.OFPIT_GOTO_TABLE)
+        # Instructions
         if valve_table.table_config.meter:
             insts.add(valve_of.ofp.OFPIT_METER)
-        inst_ids = [
-            valve_of.parser.OFPInstructionId(type_) for type_ in insts]
+        inst_ids = [valve_of.parser.OFPInstructionId(type_) for type_ in insts]
         new_table.properties.append(
             valve_of.parser.OFPTableFeaturePropInstructions(
                 type_=valve_of.ofp.OFPTFPT_INSTRUCTIONS, instruction_ids=inst_ids))
@@ -56,8 +56,8 @@ def load_tables(dp, valve_cl): # pylint: disable=invalid-name
         # Set fields and apply actions
         if valve_table.set_fields:
             apply_actions.add(valve_of.ofp.OFPAT_SET_FIELD)
-            # TODO: only select push_vlan when VLAN VID in set_fields.
-            apply_actions.add(valve_of.ofp.OFPAT_PUSH_VLAN)
+            if 'vlan_vid' in valve_table.set_fields:
+                apply_actions.add(valve_of.ofp.OFPAT_PUSH_VLAN)
             oxm_ids = [
                 valve_of.parser.OFPOxmId(type_=field, hasmask=False)
                 for field in valve_table.set_fields]

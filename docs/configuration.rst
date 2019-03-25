@@ -1,6 +1,11 @@
 Configuration
 =============
 
+.. _faucet-configuration:
+
+Faucet configuration
+--------------------
+
 Faucet is configured with a YAML-based configuration file, ``faucet.yaml``.
 The following is example demonstrating a few common features:
 
@@ -18,80 +23,14 @@ The datapath ID may be specified as an integer or hex string (beginning with 0x)
 
 A port not explicitly defined in the YAML configuration file will be left down and will drop all packets.
 
-Gauge is configured similarly with, ``gauge.yaml``.
-The following is example demonstrating a few common features:
-
-.. literalinclude:: ../etc/faucet/gauge.yaml
-  :language: yaml
-  :caption: gauge.yaml
-  :name: gauge.yaml
-
-Verifying configuration
------------------------
-
-You can verify that your configuration is correct with the ``check_faucet_config`` script:
-
-.. code:: console
-
-  check_faucet_config /etc/faucet/faucet.yaml
-
-Configuration examples
-----------------------
-
-For complete working examples of configuration features, see the unit tests, ``tests/faucet_mininet_test.py``.
-For example, ``FaucetUntaggedACLTest`` shows how to configure an ACL to block a TCP port,
-``FaucetTaggedIPv4RouteTest`` shows how to configure static IPv4 routing.
-
-Applying configuration updates
-------------------------------
-
-You can update FAUCET's configuration by sending it a HUP signal.
-This will cause it to apply the minimum number of flow changes to the switch(es), to implement the change.
-
-.. code:: console
-
-  pkill -HUP -f faucet.faucet
-
-Configuration in separate files
--------------------------------
-
-Extra DP, VLAN or ACL data can also be separated into different files and included into the main configuration file, as shown below. The ``include`` field is used for configuration files which are required to be loaded, and Faucet will log an error if there was a problem while loading a file. Files listed on ``include-optional`` will simply be skipped and a warning will be logged instead.
-
-Files are parsed in order, and both absolute and relative (to the configuration file) paths are allowed. DPs, VLANs or ACLs defined in subsequent files overwrite previously defined ones with the same name.
-
-``faucet.yaml``
-
-.. code:: yaml
-
-  include:
-      - /etc/faucet/dps.yaml
-      - /etc/faucet/vlans.yaml
-
-  include-optional:
-      - acls.yaml
-
-``dps.yaml``
-
-.. code:: yaml
-
-  # Recursive include is allowed, if needed.
-  # Again, relative paths are relative to this configuration file.
-  include-optional:
-      - override.yaml
-
-  dps:
-      test-switch-1:
-          ...
-      test-switch-2:
-          ...
-
 Configuration options
----------------------
+~~~~~~~~~~~~~~~~~~~~~
 
 Top Level
-~~~~~~~~~
+#########
+
 .. list-table:: Faucet.yaml
-    :widths: 31 15 15 60
+    :widths: 15 15 10 60
     :header-rows: 1
 
 
@@ -135,14 +74,15 @@ Top Level
         vlan's configuration (see below).
 
 DP
-~~
+##
+
 DP configuration is entered in the 'dps' configuration block. The 'dps'
 configuration contains a dictionary of configuration blocks each
 containing the configuration for one datapath. The keys can either be
 string names given to the datapath, or the OFP datapath id.
 
 .. list-table:: dps: <dp name or id>: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -161,6 +101,10 @@ string names given to the datapath, or the OFP datapath id.
       - string
       - name
       - Description of this datapath, strictly informational
+    * - dot1x
+      - dictionary
+      - {}
+      - 802.1X configuration (see below)
     * - dp_id
       - integer
       - The configuration key
@@ -317,13 +261,14 @@ string names given to the datapath, or the OFP datapath id.
 
 
 Stacking (DP)
-~~~~~~~~~~~~~
+#############
+
 Stacking is configured in the dp configuration block and in the interface
 configuration block. At the dp level the following attributes can be configured
 withing the configuration block 'stack':
 
 .. list-table:: dps: <dp name or id>: stack: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -337,19 +282,24 @@ withing the configuration block 'stack':
         should be the root for the stacking topology.
 
 LLDP (DP)
-~~~~~~~~~
+#########
+
 LLDP beacons are configured in the dp and interface configuration blocks.
 
-Note: the LLDP beacon service is specifically NOT to discover topology. It is
-intended to facilitate physical troubleshooting (e.g. a standard cable tester
-can display OF port information). A seperate system will be used to probe
-link/neighbor activity, addressing issues such as authenticity of the probes.
+LLDP beacons can be used to, among other things, facilitate physical
+troubleshooting (e.g. so that a standard cable tester can display port
+information), verify FAUCET stacking topology, and cue a phone to use
+the right voice VLAN.
+
+NOTE: while FAUCET can receive and log LLDP from other devices, FAUCET
+does not do spanning tree those LLDP packets will have no influence
+on FAUCET's forwarding decisions.
 
 The following attributes can be configured withing the 'lldp_beacon'
 configuration block at the dp level:
 
 .. list-table:: dps: <dp name or id>: lldp_beacon: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -369,8 +319,83 @@ configuration block at the dp level:
       - None
       - The maximum number of beacons, across all ports to send each interval
 
+802.1X (DP)
+###########
+
+.. note:: 802.1X support is experimental, and there may be incomplete features or bugs.
+    If you find an issue please email the mailing list or create an Github issue.
+
+Faucet implements 802.1X by forwarding EAPOL packets on the dataplane to a socket it is listening on.
+These packets are then passed through to a RADIUS server which performs the authentication
+and generates the reply message.
+
+For each instance of Faucet there is only one 802.1X speaker. This 802.1X speaker is configured by
+the options below.
+Except for the 'nfv_sw_port' option, the configuration for the speaker is configured using the first
+dp's dot1x config dictionary. For all other dps only the 'nfv_sw_port' option is required with
+the others ignored.
+
+A basic network and configuration with two hosts may look like:
+
+.. figure:: ./_static/images/8021X-conf-diagram.svg
+    :alt: ACL network diagram
+    :align: center
+    :width: 80%
+
+A brief overview of the current state of the implementation:
+
+Implemented:
+
+- EAP Types: MD5, PEAP, TLS, TTLS.
+- Authentication session expiry default 3600 seconds.
+  (configurable (per authentication) via returning the Session-Timeout attribute in the RADIUS Access-Accept message).
+- Faucet connects to a single RADIUS server, and passes through all EAP messages.
+- Client can end session with EAP-Logoff.
+
+Not Supported (yet):
+
+- RADIUS Accounting.
+- Multiple RADIUS Servers.
+- Other EAP types. E.g. FAST, ...
+- Dynamic assignment of VLAN/ACL.
+
+802.1X port authentication is configured in the dp configuration block and in the interface
+configuration block. At the dp level the following attributes can be configured
+with the configuration block 'dot1x':
+
+.. list-table:: dps: <dp name or id>: dot1x: {}
+    :widths: 30 15 15 40
+    :header-rows: 1
+
+    * - Attribute
+      - Type
+      - Default
+      - Description
+    * - nfv_intf
+      - str
+      -
+      - The interface for Faucet to listen for EAP packets from the dataplane. - NOTE: Faucet will only use the config from the first dp
+    * - nfv_sw_port
+      - int
+      -
+      - Switch port number that connects to the Faucet server's nfv_intf
+    * - radius_ip
+      - str
+      -
+      - IP address of RADIUS Server the 802.1X speaker will authenticate with. - NOTE: Faucet will only use the config from the first dp
+    * - radius_port
+      - int
+      - 1812
+      - UDP port of RADIUS Server the 802.1X speaker will authenticate with. - NOTE: Faucet will only use the config from the first dp
+    * - radius_secret
+      - str
+      -
+      - Shared secret used by the RADIUS server and the 802.1X speaker. - NOTE: Faucet will only use the config from the first dp
+
+
 Interfaces
-~~~~~~~~~~
+##########
+
 Configuration for each interface is entered in the 'interfaces' configuration
 block withing the config for the datapath. Each interface configuration block
 is a dictionary keyed by the interface name.
@@ -383,7 +408,7 @@ containing a comma separated list of OFP port numbers, interface names or with
 OFP port number ranges (eg. 1-6).
 
 .. list-table:: dps: <dp name or id>: interfaces: <interface name or OFP port number>: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -406,6 +431,10 @@ OFP port number ranges (eg. 1-6).
       - string
       - Name (which defaults to the configuration key)
       - Description, purely informational
+    * - dot1x
+      - boolean
+      - False
+      - Enable 802.1X port authentication
     * - enabled
       - boolean
       - True
@@ -423,7 +452,11 @@ OFP port number ranges (eg. 1-6).
     * - loop_protect
       - boolean
       - False
-      - If True, do simple loop protection on this port.
+      - if True, do simple (host/access port) loop protection on this port.
+    * - loop_protect_external
+      - boolean
+      - False
+      - if True, do external (other switch) loop protection on this port.
     * - max_hosts
       - integer
       - 255
@@ -431,8 +464,11 @@ OFP port number ranges (eg. 1-6).
     * - mirror
       - a list of integers or strings
       - None
-      - Mirror all packets recieved and transmitted on the ports
-        specified (by name or by port number), to this port.
+      - Mirror all allowed packets recieved from (subject to ACLs),
+        and all packets transmitted to, the ports specified
+        (by name or by port number), to this port. If mirroring
+        of denied by ACL packets is desired, use the ACL rule
+        mirror option.
     * - name
       - string
       - The configuration key.
@@ -480,13 +516,14 @@ OFP port number ranges (eg. 1-6).
 
 
 Stacking (Interfaces)
-~~~~~~~~~~~~~~~~~~~~~
+#####################
+
 Stacking port configuration indicates how datapaths are connected when using
 stacking. The configuration is found under the 'stack' attribute of an
 interface configuration block. The following attributes can be configured:
 
 .. list-table:: dps: <dp name or id>: interfaces: <interface name or port number: stack: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -504,11 +541,12 @@ interface configuration block. The following attributes can be configured:
         to this interface.
 
 LLDP (Interfaces)
-~~~~~~~~~~~~~~~~~
+#################
+
 Interface specific configuration for LLDP.
 
 .. list-table:: dps: <dp name or id>: interfaces: <interface name or port number: lldp_beacon: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -534,14 +572,15 @@ Interface specific configuration for LLDP.
 
 
 LLDP Organisational TLVs (Interfaces)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#####################################
+
 Faucet allows defining organisational TLVs for LLDP beacons. These are configured
 in a list under lldp_beacons/org_tlvs at the interfaces level of configuration.
 
 Each list element contains a dictionary with the following elements:
 
 .. list-table:: dps: <dp name or id>: interfaces: <interface name or port number: lldp_beacon: org_tlvs: - {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -562,15 +601,16 @@ Each list element contains a dictionary with the following elements:
       - The organizationally defined subtype
 
 Router
-~~~~~~
-Routers config is used to allow routing between vlans. Routers configuration
+######
+
+Routers config is used to allow routing between VLANs, and optionally BGP. Routers configuration
 is entered in the 'routers' configuration block at the top level of the faucet
 configuration file. Configuration for each router is an entry in the routers
 dictionary and is keyed by a name for the router. The following attributes can
 be configured:
 
 .. list-table:: routers: <router name>: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -580,18 +620,70 @@ be configured:
     * - vlans
       - list of integers or strings
       - None
-      - Enables inter-vlan routing on the given vlans
+      - Enables inter-vlan routing on the given VLANs.
+    * - bgp
+      - BGP configuration.
+      - None
+      - See below for BGP configuration.
+
+.. _bgp-configuration:
+
+BGP
+###
+
+Routers config to enable BGP routing.
+
+.. list-table:: routers: <router name>: {}
+    :widths: 30 15 15 40
+    :header-rows: 1
+
+    * - Attribute
+      - Type
+      - Default
+      - Description
+    * - as
+      - integer
+      - None
+      - The local AS number to used when speaking BGP
+    * - connect_mode
+      - string
+      - "passive"
+      - Must be "passive"
+    * - neighbor_addresses
+      - list of strings (IP addresses)
+      - None
+      - The list of BGP neighbours
+    * - neighbor_as
+      - integer
+      - None
+      - The AS Number for the BGP neighbours
+    * - routerid
+      - string (IP address)
+      - None
+      - BGP router ID.
+    * - server_addresses
+      - list of strings (IP addresses)
+      - None
+      - IP addresses for FAUCET to listen for incoming BGP addresses.
+    * - port
+      - integer
+      - None
+      - Port to use for BGP sessions
+    * - vlan
+      - string
+      - None
+      - The VLAN to add/remove BGP routes from.
 
 
 VLAN
-~~~~
+####
 
 VLANs are configured in the 'vlans' configuration block at the top level of
 the faucet config file. The config for each vlan is an entry keyed by its vid
 or a name. The following attributes can be configured:
 
 .. list-table:: vlans: <vlan name or vid>: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -608,30 +700,6 @@ or a name. The following attributes can be configured:
       - None
       - The acl to be applied to all packets arriving on this vlan.
         ACLs listed first take priority over those later in the list.
-    * - bgp_as
-      - integer
-      - None
-      - The local AS number to used when speaking BGP
-    * - bgp_connect_mode
-      - string
-      - "both"
-      - Whether to try to connect to natives ("active"), listen only ("passive"), or "both".
-    * - bgp_local_address
-      - string (IP Address)
-      - None
-      - The local address to use when speaking BGP
-    * - bgp_neighbour_addresses
-      - list of strings (IP Addresses)
-      - None
-      - The list of BGP neighbours
-    * - bgp_neighbour_as
-      - integer
-      - None
-      - The AS Number for the BGP neighbours
-    * - bgp_port
-      - integer
-      - 9179
-      - Port to use for bgp sessions
     * - description
       - string
       - None
@@ -685,14 +753,14 @@ or a name. The following attributes can be configured:
       - The vid for the vlan.
 
 Static Routes
-~~~~~~~~~~~~~
+#############
 
 Static routes are given as a list. Each entry in the list contains a dictionary
 keyed with the keyword 'route' and contains a dictionary configuration block as
 follows:
 
 .. list-table:: vlans: <vlan name or vid>: routes: - route: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -711,7 +779,7 @@ follows:
 .. _configuration-meters:
 
 Meters
-~~~~~~
+######
 
 .. note:: Meters are platform dependent and not all functions may be available. 
 
@@ -719,7 +787,7 @@ Meters are configured under the 'meters' configuration block. The meters block
 contains a dictionary of individual meters each keyed by its name.
 
 .. list-table:: meters: <meter name>:
-   :widths: 31 15 15 60
+   :widths: 30 15 15 40
    :header-rows: 1
 
    * - Attribute
@@ -736,7 +804,7 @@ contains a dictionary of individual meters each keyed by its name.
      - Defines the meter actions. Details Below.
 
 .. list-table:: : meters: <meter name>: entry:
-   :widths: 31 15 15 60
+   :widths: 30 15 15 40
    :header-rows: 1
 
    * - Attribute
@@ -753,7 +821,7 @@ contains a dictionary of individual meters each keyed by its name.
      -
 
 .. list-table:: : meters: <meter name>: entry: bands:
-   :widths: 31 15 15 60
+   :widths: 30 15 15 40
    :header-rows: 1
 
    * - Attribute
@@ -778,7 +846,7 @@ contains a dictionary of individual meters each keyed by its name.
      - Only used if type is DSCP_REMARK. The amount by which the drop precedence should be increased.
 
 ACLs
-~~~~
+####
 
 ACLs are configured under the 'acls' configuration block. The acls block
 contains a dictionary of individual acls each keyed by its name.
@@ -791,7 +859,7 @@ and actions. Matches are key/values based on the ryu RESTFul API. Actions
 is a dictionary of actions to apply upon match.
 
 .. list-table:: : acls: <acl name>: - rule: actions: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -818,7 +886,7 @@ is a dictionary of actions to apply upon match.
     * - mirror
       - string or integer
       - None
-      - Copy the packet, before any modifications, to the specified port (NOTE: mirroring is done in input direction only)
+      - Copy the packet, before any modifications, to the specified port (NOTE: ACL mirroring is done in input direction only)
     * - output
       - dictionary
       - None
@@ -827,7 +895,7 @@ is a dictionary of actions to apply upon match.
 The output action contains a dictionary with the following elements:
 
 .. list-table:: : acls: <acl name>: - rule: actions: output: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -870,7 +938,7 @@ The output action contains a dictionary with the following elements:
 Failover is an experimental option, but can be configured as follows:
 
 .. list-table:: : acls: <acl name>: - rule: actions: output: failover: {}
-    :widths: 31 15 15 60
+    :widths: 30 15 15 40
     :header-rows: 1
 
     * - Attribute
@@ -886,6 +954,79 @@ Failover is an experimental option, but can be configured as follows:
       - None
       - The list of ports the packet can be output through.
 
+.. _gauge-configuration:
+
+Gauge configuration
+-------------------
+
+Gauge is configured similarly with, ``gauge.yaml``.
+The following is an example demonstrating a few common features:
+
+.. literalinclude:: ../etc/faucet/gauge.yaml
+  :language: yaml
+  :caption: gauge.yaml
+  :name: gauge.yaml
+
+Verifying configuration
+-----------------------
+
+You can verify that your configuration is correct with the ``check_faucet_config`` script:
+
+.. code:: console
+
+  check_faucet_config /etc/faucet/faucet.yaml
+
+Configuration examples
+----------------------
+
+For complete working examples of configuration features, see the unit tests, ``tests/faucet_mininet_test.py``.
+For example, ``FaucetUntaggedACLTest`` shows how to configure an ACL to block a TCP port,
+``FaucetTaggedIPv4RouteTest`` shows how to configure static IPv4 routing.
+
+Applying configuration updates
+------------------------------
+
+You can update FAUCET's configuration by sending it a HUP signal.
+This will cause it to apply the minimum number of flow changes to the switch(es), to implement the change.
+
+.. code:: console
+
+  pkill -HUP -f faucet.faucet
+
+Configuration in separate files
+-------------------------------
+
+Extra DP, VLAN or ACL data can also be separated into different files and included into the main configuration file, as shown below. The ``include`` field is used for configuration files which are required to be loaded, and Faucet will log an error if there was a problem while loading a file. Files listed on ``include-optional`` will simply be skipped and a warning will be logged instead.
+
+Files are parsed in order, and both absolute and relative (to the configuration file) paths are allowed. DPs, VLANs or ACLs defined in subsequent files overwrite previously defined ones with the same name.
+
+``faucet.yaml``
+
+.. code:: yaml
+
+  include:
+      - /etc/faucet/dps.yaml
+      - /etc/faucet/vlans.yaml
+
+  include-optional:
+      - acls.yaml
+
+``dps.yaml``
+
+.. code:: yaml
+
+  # Recursive include is allowed, if needed.
+  # Again, relative paths are relative to this configuration file.
+  include-optional:
+      - override.yaml
+
+  dps:
+      test-switch-1:
+          ...
+      test-switch-2:
+          ...
+
+
 .. _env-vars:
 
 Environment variables
@@ -895,7 +1036,7 @@ You can use environment variables to override default behaviour of faucet
 such as paths for configuration files and port numbers.
 
 .. list-table::
-    :widths: 31 15 15 60
+    :widths: 35 10 25 30
     :header-rows: 1
 
     * - Environment Variable
@@ -904,7 +1045,8 @@ such as paths for configuration files and port numbers.
       - Description
     * - FAUCET_CONFIG
       - Colon-separated list of file paths
-      - /etc/faucet/faucet.yaml:/etc/ryu/faucet/faucet.yaml
+      - | /etc/faucet/faucet.yaml:
+        | /etc/ryu/faucet/faucet.yaml
       - Faucet will load it's configuration from the first valid file in list
     * - FAUCET_CONFIG_STAT_RELOAD
       - boolean
@@ -916,11 +1058,13 @@ such as paths for configuration files and port numbers.
       - Log verbosity
     * - FAUCET_LOG
       - File path or STDOUT or STDERR
-      - /var/log/faucet/faucet.log
+      - | /var/log/faucet/
+        | faucet.log
       - Location for faucet to log messages to, can be special values STDOUT or STDERR
     * - FAUCET_EXCEPTION_LOG
       - File path  or STDOUT or STDERR
-      - /var/log/faucet/faucet_exception.log
+      - | /var/log/faucet/
+        | faucet_exception.log
       - Location for faucet log to log exceptions to, can be special values STDOUT or STDERR
     * - FAUCET_EVENT_SOCK
       - Socket path
@@ -936,7 +1080,8 @@ such as paths for configuration files and port numbers.
       - IP address to listen on for faucet prometheus client
     * - GAUGE_CONFIG
       - Colon-separated list of file paths
-      - /etc/faucet/gauge.yaml:/etc/ryu/faucet/gauge.yaml
+      - | /etc/faucet/gauge.yaml:
+        | /etc/ryu/faucet/gauge.yaml
       - Guage will load it's configuration from the first valid file in list
     * - GAUGE_CONFIG_STAT_RELOAD
       - boolean
@@ -948,11 +1093,13 @@ such as paths for configuration files and port numbers.
       - Log verbosity
     * - GAUGE_LOG
       - File path or STDOUT or STDERR
-      - /var/log/faucet/gauge.log
+      - | /var/log/faucet/
+        | gauge.log
       - Location for gauge to log messages to, can be special values STDOUT or STDERR
     * - GAUGE_EXCEPTION_LOG
       - File path or STDOUT or STDERR
-      - /var/log/faucet/gauge_exception.log
+      - | /var/log/faucet/
+        | gauge_exception.log
       - Location for faucet log to log exceptions to, can be special values STDOUT or STDERR
     * - GAUGE_PROMETHEUS_ADDR
       - IP address

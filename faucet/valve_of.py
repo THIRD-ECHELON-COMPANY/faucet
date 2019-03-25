@@ -41,6 +41,135 @@ OFP_IN_PORT = ofp.OFPP_IN_PORT
 MAX_PACKET_IN_BYTES = 128
 ECTP_ETH_TYPE = 0x9000
 
+OFERROR_TYPE_CODE = {
+    0: ('OFPET_HELLO_FAILED', {
+        ofp.OFPHFC_INCOMPATIBLE: 'OFPHFC_INCOMPATIBLE',
+        ofp.OFPHFC_EPERM: 'OFPHFC_EPERM'}),
+    1: ('OFPET_BAD_REQUEST', {
+        ofp.OFPBRC_BAD_VERSION: 'OFPBRC_BAD_VERSION',
+        ofp.OFPBRC_BAD_TYPE: 'OFPBRC_BAD_TYPE',
+        ofp.OFPBRC_BAD_MULTIPART: 'OFPBRC_BAD_MULTIPART',
+        ofp.OFPBRC_BAD_EXPERIMENTER: 'OFPBRC_BAD_EXPERIMENTER',
+        ofp.OFPBRC_BAD_EXP_TYPE: 'OFPBRC_BAD_EXP_TYPE',
+        ofp.OFPBRC_EPERM: 'OFPBRC_EPERM',
+        ofp.OFPBRC_BAD_LEN: 'OFPBRC_BAD_LEN',
+        ofp.OFPBRC_BUFFER_EMPTY: 'OFPBRC_BUFFER_EMPTY',
+        ofp.OFPBRC_BUFFER_UNKNOWN: 'OFPBRC_BUFFER_UNKNOWN',
+        ofp.OFPBRC_BAD_TABLE_ID: 'OFPBRC_BAD_TABLE_ID',
+        ofp.OFPBRC_IS_SLAVE: 'OFPBRC_IS_SLAVE',
+        ofp.OFPBRC_BAD_PORT: 'OFPBRC_BAD_PORT',
+        ofp.OFPBRC_BAD_PACKET: 'OFPBRC_BAD_PACKET',
+        ofp.OFPBRC_MULTIPART_BUFFER_OVERFLOW: 'OFPBRC_MULTIPART_BUFFER_OVERFLOW'}),
+    2: ('OFPET_BAD_ACTION', {
+        ofp.OFPBAC_BAD_TYPE: 'OFPBAC_BAD_TYPE',
+        ofp.OFPBAC_BAD_LEN: 'OFPBAC_BAD_LEN',
+        ofp.OFPBAC_BAD_EXPERIMENTER: 'OFPBAC_BAD_EXPERIMENTER',
+        ofp.OFPBAC_BAD_EXP_TYPE: 'OFPBAC_BAD_EXP_TYPE',
+        ofp.OFPBAC_BAD_OUT_PORT: 'OFPBAC_BAD_OUT_PORT',
+        ofp.OFPBAC_BAD_ARGUMENT: 'OFPBAC_BAD_ARGUMENT',
+        ofp.OFPBAC_EPERM: 'OFPBAC_EPERM',
+        ofp.OFPBAC_TOO_MANY: 'OFPBAC_TOO_MANY',
+        ofp.OFPBAC_BAD_QUEUE: 'OFPBAC_BAD_QUEUE',
+        ofp.OFPBAC_BAD_OUT_GROUP: 'OFPBAC_BAD_OUT_GROUP',
+        ofp.OFPBAC_MATCH_INCONSISTENT: 'OFPBAC_MATCH_INCONSISTENT',
+        ofp.OFPBAC_UNSUPPORTED_ORDER: 'OFPBAC_UNSUPPORTED_ORDER',
+        ofp.OFPBAC_BAD_TAG: 'OFPBAC_BAD_TAG',
+        ofp.OFPBAC_BAD_SET_TYPE: 'OFPBAC_BAD_SET_TYPE',
+        ofp.OFPBAC_BAD_SET_LEN: 'OFPBAC_BAD_SET_LEN',
+        ofp.OFPBAC_BAD_SET_ARGUMENT: 'OFPBAC_BAD_SET_ARGUMENT'}),
+    3: ('OFPET_BAD_INSTRUCTION', {
+        ofp.OFPBIC_UNKNOWN_INST: 'OFPBIC_UNKNOWN_INST',
+        ofp.OFPBIC_UNSUP_INST: 'OFPBIC_UNSUP_INST',
+        ofp.OFPBIC_BAD_TABLE_ID: 'OFPBIC_BAD_TABLE_ID',
+        ofp.OFPBIC_UNSUP_METADATA: 'OFPBIC_UNSUP_METADATA',
+        ofp.OFPBIC_UNSUP_METADATA_MASK: 'OFPBIC_UNSUP_METADATA_MASK',
+        ofp.OFPBIC_BAD_EXPERIMENTER: 'OFPBIC_BAD_EXPERIMENTER',
+        ofp.OFPBIC_BAD_EXP_TYPE: 'OFPBIC_BAD_EXP_TYPE',
+        ofp.OFPBIC_BAD_LEN: 'OFPBIC_BAD_LEN',
+        ofp.OFPBIC_EPERM: 'OFPBIC_EPERM'}),
+    4: ('OFPET_BAD_MATCH', {
+        ofp.OFPBMC_BAD_TYPE: 'OFPBMC_BAD_TYPE',
+        ofp.OFPBMC_BAD_LEN: 'OFPBMC_BAD_LEN',
+        ofp.OFPBMC_BAD_TAG: 'OFPBMC_BAD_TAG',
+        ofp.OFPBMC_BAD_DL_ADDR_MASK: 'OFPBMC_BAD_DL_ADDR_MASK',
+        ofp.OFPBMC_BAD_NW_ADDR_MASK: 'OFPBMC_BAD_NW_ADDR_MASK',
+        ofp.OFPBMC_BAD_WILDCARDS: 'OFPBMC_BAD_WILDCARDS',
+        ofp.OFPBMC_BAD_FIELD: 'OFPBMC_BAD_FIELD',
+        ofp.OFPBMC_BAD_VALUE: 'OFPBMC_BAD_VALUE',
+        ofp.OFPBMC_BAD_MASK: 'OFPBMC_BAD_MASK',
+        ofp.OFPBMC_BAD_PREREQ: 'OFPBMC_BAD_PREREQ',
+        ofp.OFPBMC_DUP_FIELD: 'OFPBMC_DUP_FIELD',
+        ofp.OFPBMC_EPERM: 'OFPBMC_EPERM'}),
+    5: ('OFPET_FLOW_MOD_FAILED', {
+        ofp.OFPFMFC_UNKNOWN: 'OFPFMFC_UNKNOWN',
+        ofp.OFPFMFC_TABLE_FULL: 'OFPFMFC_TABLE_FULL',
+        ofp.OFPFMFC_BAD_TABLE_ID: 'OFPFMFC_BAD_TABLE_ID',
+        ofp.OFPFMFC_OVERLAP: 'OFPFMFC_OVERLAP',
+        ofp.OFPFMFC_EPERM: 'OFPFMFC_EPERM',
+        ofp.OFPFMFC_BAD_TIMEOUT: 'OFPFMFC_BAD_TIMEOUT',
+        ofp.OFPFMFC_BAD_COMMAND: 'OFPFMFC_BAD_COMMAND',
+        ofp.OFPFMFC_BAD_FLAGS: 'OFPFMFC_BAD_FLAGS'}),
+    6: ('OFPET_GROUP_MOD_FAILED', {
+        ofp.OFPGMFC_GROUP_EXISTS: 'OFPGMFC_GROUP_EXISTS',
+        ofp.OFPGMFC_INVALID_GROUP: 'OFPGMFC_INVALID_GROUP',
+        ofp.OFPGMFC_WEIGHT_UNSUPPORTED: 'OFPGMFC_WEIGHT_UNSUPPORTED',
+        ofp.OFPGMFC_OUT_OF_GROUPS: 'OFPGMFC_OUT_OF_GROUPS',
+        ofp.OFPGMFC_OUT_OF_BUCKETS: 'OFPGMFC_OUT_OF_BUCKETS',
+        ofp.OFPGMFC_CHAINING_UNSUPPORTED: 'OFPGMFC_CHAINING_UNSUPPORTED',
+        ofp.OFPGMFC_WATCH_UNSUPPORTED: 'OFPGMFC_WATCH_UNSUPPORTED',
+        ofp.OFPGMFC_LOOP: 'OFPGMFC_LOOP',
+        ofp.OFPGMFC_UNKNOWN_GROUP: 'OFPGMFC_UNKNOWN_GROUP',
+        ofp.OFPGMFC_CHAINED_GROUP: 'OFPGMFC_CHAINED_GROUP',
+        ofp.OFPGMFC_BAD_TYPE: 'OFPGMFC_BAD_TYPE',
+        ofp.OFPGMFC_BAD_COMMAND: 'OFPGMFC_BAD_COMMAND',
+        ofp.OFPGMFC_BAD_BUCKET: 'OFPGMFC_BAD_BUCKET',
+        ofp.OFPGMFC_BAD_WATCH: 'OFPGMFC_BAD_WATCH',
+        ofp.OFPGMFC_EPERM: 'OFPGMFC_EPERM'}),
+    7: ('OFPET_PORT_MOD_FAILED', {
+        ofp.OFPPMFC_BAD_PORT: 'OFPPMFC_BAD_PORT',
+        ofp.OFPPMFC_BAD_HW_ADDR: 'OFPPMFC_BAD_HW_ADDR',
+        ofp.OFPPMFC_BAD_CONFIG: 'OFPPMFC_BAD_CONFIG',
+        ofp.OFPPMFC_BAD_ADVERTISE: 'OFPPMFC_BAD_ADVERTISE',
+        ofp.OFPPMFC_EPERM: 'OFPPMFC_EPERM'}),
+    8: ('OFPET_TABLE_MOD_FAILED', {
+        ofp.OFPTMFC_BAD_TABLE: 'OFPTMFC_BAD_TABLE',
+        ofp.OFPTMFC_BAD_CONFIG: 'OFPTMFC_BAD_CONFIG',
+        ofp.OFPTMFC_EPERM: 'OFPTMFC_EPERM'}),
+    9: ('OFPET_QUEUE_OP_FAILED', {
+        ofp.OFPQOFC_BAD_PORT: 'OFPQOFC_BAD_PORT',
+        ofp.OFPQOFC_BAD_QUEUE: 'OFPQOFC_BAD_QUEUE',
+        ofp.OFPQOFC_EPERM: 'OFPQOFC_EPERM'}),
+    10: ('OFPET_SWITCH_CONFIG_FAILED', {
+        ofp.OFPSCFC_BAD_FLAGS: 'OFPSCFC_BAD_FLAGS',
+        ofp.OFPSCFC_BAD_LEN: 'OFPSCFC_BAD_LEN',
+        ofp.OFPSCFC_EPERM: 'OFPSCFC_EPERM'}),
+    11: ('OFPET_ROLE_REQUEST_FAILED', {
+        ofp.OFPRRFC_STALE: 'OFPRRFC_STALE',
+        ofp.OFPRRFC_UNSUP: 'OFPRRFC_UNSUP',
+        ofp.OFPRRFC_BAD_ROLE: 'OFPRRFC_BAD_ROLE'}),
+    12: ('OFPET_METER_MOD_FAILED', {
+        ofp.OFPMMFC_UNKNOWN: 'OFPMMFC_UNKNOWN',
+        ofp.OFPMMFC_METER_EXISTS: 'OFPMMFC_METER_EXISTS',
+        ofp.OFPMMFC_INVALID_METER: 'OFPMMFC_INVALID_METER',
+        ofp.OFPMMFC_UNKNOWN_METER: 'OFPMMFC_UNKNOWN_METER',
+        ofp.OFPMMFC_BAD_COMMAND: 'OFPMMFC_BAD_COMMAND',
+        ofp.OFPMMFC_BAD_FLAGS: 'OFPMMFC_BAD_FLAGS',
+        ofp.OFPMMFC_BAD_RATE: 'OFPMMFC_BAD_RATE',
+        ofp.OFPMMFC_BAD_BURST: 'OFPMMFC_BAD_BURST',
+        ofp.OFPMMFC_BAD_BAND: 'OFPMMFC_BAD_BAND',
+        ofp.OFPMMFC_BAD_BAND_VALUE: 'OFPMMFC_BAD_BAND_VALUE',
+        ofp.OFPMMFC_OUT_OF_METERS: 'OFPMMFC_OUT_OF_METERS',
+        ofp.OFPMMFC_OUT_OF_BANDS: 'OFPMMFC_OUT_OF_BANDS'}),
+    13: ('OFPET_TABLE_FEATURES_FAILED', {
+        ofp.OFPTFFC_BAD_TABLE: 'OFPTFFC_BAD_TABLE',
+        ofp.OFPTFFC_BAD_METADATA: 'OFPTFFC_BAD_METADATA',
+        ofp.OFPTFFC_BAD_TYPE: 'OFPTFFC_BAD_TYPE',
+        ofp.OFPTFFC_BAD_LEN: 'OFPTFFC_BAD_LEN',
+        ofp.OFPTFFC_BAD_ARGUMENT: 'OFPTFFC_BAD_ARGUMENT',
+        ofp.OFPTFFC_EPERM: 'OFPTFFC_EPERM'}),
+    65535: ('OFPET_EXPERIMENTER', {}),
+}
+
 
 def ignore_port(port_num):
     """Return True if FAUCET should ignore this port.
@@ -116,6 +245,15 @@ def is_packetout(ofmsg):
     """
     return isinstance(ofmsg, parser.OFPPacketOut)
 
+def is_output(ofmsg):
+    """Return True if flow message is an action output message.
+
+    Args:
+        ofmsg: ryu.ofproto.ofproto_v1_3_parser message.
+    Returns:
+        bool: True if is a OFPActionOutput.
+    """
+    return isinstance(ofmsg, parser.OFPActionOutput)
 
 def is_flowdel(ofmsg):
     """Return True if flow message is a FlowMod and a delete.
@@ -131,7 +269,6 @@ def is_flowdel(ofmsg):
         return True
     return False
 
-
 def is_groupdel(ofmsg):
     """Return True if OF message is a GroupMod and command is delete.
 
@@ -144,7 +281,6 @@ def is_groupdel(ofmsg):
             (ofmsg.command == ofp.OFPGC_DELETE)):
         return True
     return False
-
 
 def is_meterdel(ofmsg):
     """Return True if OF message is a MeterMod and command is delete.
@@ -241,6 +377,19 @@ def goto_table(table):
     """
     return parser.OFPInstructionGotoTable(table.table_id)
 
+def metadata_goto_table(metadata, mask, table):
+    """Return instructions to write metadata and goto table.
+
+    Args:
+        metadata (int): metadata to write to packet
+        maks (int): mask to apply to metadata
+        table (ValveTable): table to goto.
+    Returns:
+        list of OFPInstructions"""
+    return [
+        parser.OFPInstructionWriteMetadata(metadata, mask),
+        parser.OFPInstructionGotoTable(table.table_id)
+        ]
 
 def set_field(**kwds):
     """Return action to set any field.
@@ -251,28 +400,6 @@ def set_field(**kwds):
         ryu.ofproto.ofproto_v1_3_parser.OFPActionSetField: set field action.
     """
     return parser.OFPActionSetField(**kwds)
-
-
-def set_eth_src(eth_src):
-    """Return action to set source Ethernet MAC address.
-
-    Args:
-        eth_src (str): source Ethernet MAC address.
-    Returns:
-        ryu.ofproto.ofproto_v1_3_parser.OFPActionSetField: set field action.
-    """
-    return set_field(eth_src=eth_src)
-
-
-def set_eth_dst(eth_dst):
-    """Return action to set destination Ethernet MAC address.
-
-    Args:
-        eth_src (str): destination Ethernet MAC address.
-    Returns:
-        ryu.ofproto.ofproto_v1_3_parser.OFPActionSetField: set field action.
-    """
-    return set_field(eth_dst=eth_dst)
 
 
 def vid_present(vid):
@@ -297,18 +424,7 @@ def devid_present(vid):
     return vid ^ ofp.OFPVID_PRESENT
 
 
-def set_vlan_vid(vlan_vid):
-    """Set VLAN VID with VID_PRESENT flag set.
-
-    Args:
-        vid (int): VLAN VID
-    Returns:
-        ryu.ofproto.ofproto_v1_3_parser.OFPActionSetField: set VID with VID_PRESENT.
-    """
-    return set_field(vlan_vid=vid_present(vlan_vid))
-
-
-def push_vlan_act(vlan_vid, eth_type=ether.ETH_TYPE_8021Q):
+def push_vlan_act(table, vlan_vid, eth_type=ether.ETH_TYPE_8021Q):
     """Return OpenFlow action list to push Ethernet 802.1Q header with VLAN VID.
 
     Args:
@@ -318,7 +434,7 @@ def push_vlan_act(vlan_vid, eth_type=ether.ETH_TYPE_8021Q):
     """
     return [
         parser.OFPActionPushVlan(eth_type),
-        set_vlan_vid(vlan_vid),
+        table.set_vlan_vid(vlan_vid),
     ]
 
 
@@ -383,6 +499,23 @@ def output_controller(max_len=MAX_PACKET_IN_BYTES):
     """
     return output_port(ofp.OFPP_CONTROLLER, max_len)
 
+def packetouts(port_nums, data):
+    """Return OpenFlow action to mulltiply packet out to dataplane from controller.
+
+    Args:
+        port_num (list): ints, ports to output to.
+        data (str): raw packet to output.
+    Returns:
+        ryu.ofproto.ofproto_v1_3_parser.OFPActionOutput: packet out action.
+    """
+    random.shuffle(port_nums)
+    return parser.OFPPacketOut(
+        datapath=None,
+        buffer_id=ofp.OFP_NO_BUFFER,
+        in_port=ofp.OFPP_CONTROLLER,
+        actions=[output_port(port_num) for port_num in port_nums],
+        data=data)
+
 
 def packetout(port_num, data):
     """Return OpenFlow action to packet out to dataplane from controller.
@@ -393,12 +526,7 @@ def packetout(port_num, data):
     Returns:
         ryu.ofproto.ofproto_v1_3_parser.OFPActionOutput: packet out action.
     """
-    return parser.OFPPacketOut(
-        datapath=None,
-        buffer_id=ofp.OFP_NO_BUFFER,
-        in_port=ofp.OFPP_CONTROLLER,
-        actions=[output_port(port_num)],
-        data=data)
+    return packetouts([port_num], data)
 
 
 def barrier():
@@ -476,13 +604,13 @@ MATCH_FIELDS = {
 
 
 def match_from_dict(match_dict):
-    for old_match, new_match in list(OLD_MATCH_FIELDS.items()):
+    for old_match, new_match in OLD_MATCH_FIELDS.items():
         if old_match in match_dict:
             match_dict[new_match] = match_dict[old_match]
             del match_dict[old_match]
 
     kwargs = {}
-    for of_match, field in list(match_dict.items()):
+    for of_match, field in match_dict.items():
         test_config_condition(of_match not in MATCH_FIELDS, 'Unknown match field: %s' % of_match)
         try:
             encoded_field = MATCH_FIELDS[of_match](field)
@@ -499,21 +627,24 @@ def _match_ip_masked(ipa):
     return (str(ipa.ip), str(ipa.netmask))
 
 
-def build_match_dict(in_port=None, vlan=None,
-                     eth_type=None, eth_src=None,
-                     eth_dst=None, eth_dst_mask=None,
-                     icmpv6_type=None,
-                     nw_proto=None, nw_dst=None):
+def build_match_dict(in_port=None, vlan=None, eth_type=None, eth_src=None,
+                     eth_dst=None, eth_dst_mask=None, icmpv6_type=None,
+                     nw_proto=None, nw_dst=None, metadata=None,
+                     metadata_mask=None, vlan_pcp=None):
     match_dict = {}
     if in_port is not None:
         match_dict['in_port'] = in_port
     if vlan is not None:
-        if vlan.vid == ofp.OFPVID_NONE:
+        if isinstance(vlan, int):
+            vid = vlan
+        else:
+            vid = vlan.vid
+        if vid == ofp.OFPVID_NONE:
             match_dict['vlan_vid'] = int(ofp.OFPVID_NONE)
-        elif vlan.vid == ofp.OFPVID_PRESENT:
+        elif vid == ofp.OFPVID_PRESENT:
             match_dict['vlan_vid'] = (ofp.OFPVID_PRESENT, ofp.OFPVID_PRESENT)
         else:
-            match_dict['vlan_vid'] = vid_present(vlan.vid)
+            match_dict['vlan_vid'] = vid_present(vid)
     if eth_src is not None:
         match_dict['eth_src'] = eth_src
     if eth_dst is not None:
@@ -535,6 +666,13 @@ def build_match_dict(in_port=None, vlan=None,
             match_dict['ipv6_dst'] = nw_dst_masked
     if eth_type is not None:
         match_dict['eth_type'] = eth_type
+    if metadata is not None:
+        if metadata_mask is not None:
+            match_dict['metadata'] = (metadata, metadata_mask)
+        else:
+            match_dict['metadata'] = metadata
+    if vlan_pcp is not None:
+        match_dict['vlan_pcp'] = vlan_pcp
     return match_dict
 
 
@@ -568,6 +706,18 @@ def bucket(weight=0, watch_port=ofp.OFPP_ANY,
         watch_port=watch_port,
         watch_group=watch_group,
         actions=actions)
+
+
+def build_group_flood_buckets(vlan_flood_acts):
+    """Return a list of group buckets to implement flooding on a VLAN."""
+    buckets = []
+    non_outputs = []
+    for act in vlan_flood_acts:
+        if is_output(act):
+            buckets.append(bucket(actions=non_outputs+[act]))
+        else:
+            non_outputs.append(act)
+    return buckets
 
 
 def groupmod(datapath=None, type_=ofp.OFPGT_ALL, group_id=0, buckets=None):
@@ -707,46 +857,41 @@ def dedupe_ofmsgs(input_ofmsgs):
     return deduped_input_ofmsgs
 
 
+# kind, random_order, suggest_barrier
 _OFMSG_ORDER = (
-    ('delete', True),
-    ('tfm', True),
-    ('groupadd', True),
-    ('meteradd', True),
-    ('other', True),
-    ('packetout', False),
+    ('delete', False, True),
+    ('tfm', False, True),
+    ('groupadd', False, True),
+    ('meteradd', False, True),
+    ('other', False, False),
+    ('packetout', True, False),
 )
 
 
 def valve_flowreorder(input_ofmsgs, use_barriers=True):
     """Reorder flows for better OFA performance."""
     # Move all deletes to be first, and add one barrier,
-    # while preserving order. Platforms that do parallel delete
-    # will perform better and platforms that don't will have
-    # at most only one barrier to deal with.
-    # TODO: further optimizations may be possible - for example,
-    # reorder adds to be in priority order.
+    # while optionally randomizing order. Platforms that do
+    # parallel delete will perform better and platforms that
+    # don't will have at most only one barrier to deal with.
     output_ofmsgs = []
     by_kind = _partition_ofmsgs(dedupe_ofmsgs(input_ofmsgs))
-    for kind, in_order in _OFMSG_ORDER:
+    for kind, random_order, suggest_barrier in _OFMSG_ORDER:
         ofmsgs = by_kind.get(kind, [])
         if ofmsgs:
-            if not in_order:
+            if random_order:
                 random.shuffle(ofmsgs)
+            else:
+                with_priorities = [ofmsg for ofmsg in ofmsgs if hasattr(ofmsg, 'priority')]
+                # If priority present, send highest priority first.
+                if with_priorities:
+                    with_priorities.sort(key=lambda ofmsg: ofmsg.priority, reverse=True)
+                    without_priorities = [ofmsg for ofmsg in ofmsgs if not hasattr(ofmsg, 'priority')]
+                    ofmsgs = without_priorities + with_priorities
             output_ofmsgs.extend(ofmsgs)
-            if use_barriers:
+            if use_barriers and suggest_barrier:
                 output_ofmsgs.append(barrier())
     return output_ofmsgs
-
-
-def group_flood_buckets(ports, untagged):
-    buckets = []
-    for port in ports:
-        out_actions = []
-        if untagged:
-            out_actions.append(pop_vlan())
-        out_actions.append(output_port(port.number))
-        buckets.append(bucket(actions=out_actions))
-    return buckets
 
 
 def flood_tagged_port_outputs(ports, in_port=None, exclude_ports=None):
@@ -755,23 +900,30 @@ def flood_tagged_port_outputs(ports, in_port=None, exclude_ports=None):
     if ports:
         for port in ports:
             if in_port is not None and port == in_port:
-                if port.hairpin:
+                if in_port.hairpin:
                     flood_acts.append(output_in_port())
                 continue
             if exclude_ports and port in exclude_ports:
                 continue
             flood_acts.append(output_port(port.number))
-    return flood_acts
+            flood_acts.extend(port.mirror_actions())
+    return dedupe_output_port_acts(flood_acts)
 
 
 def flood_untagged_port_outputs(ports, in_port=None, exclude_ports=None):
     """Return list of actions necessary to flood to list of untagged ports."""
-    flood_acts = []
-    if ports:
-        flood_acts.append(pop_vlan())
-        flood_acts.extend(flood_tagged_port_outputs(
-            ports, in_port=in_port, exclude_ports=exclude_ports))
+    flood_acts = flood_tagged_port_outputs(
+        ports, in_port=in_port, exclude_ports=exclude_ports)
+    if flood_acts:
+        flood_acts = [pop_vlan()] + flood_acts
     return flood_acts
+
+
+def flood_port_outputs(tagged_ports, untagged_ports, in_port=None, exclude_ports=None):
+    """Return actions for both tagged and untagged ports."""
+    return (
+        flood_tagged_port_outputs(tagged_ports, in_port, exclude_ports) +
+        flood_untagged_port_outputs(untagged_ports, in_port, exclude_ports))
 
 
 def faucet_config(datapath=None):

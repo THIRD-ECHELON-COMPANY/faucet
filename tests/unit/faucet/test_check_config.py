@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+"""Test that check config script handles various broken configs."""
+
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Innovation Advanced Network New Zealand Ltd.
 # Copyright (C) 2015--2018 The Contributors
@@ -38,29 +40,36 @@ class CheckConfigTestCase(unittest.TestCase): # pytype: disable=module-attr
         shutil.rmtree(self.tmpdir)
 
     def run_check_config(self, config, expected_ok):
-        conf_file_name = os.path.join(self.tmpdir, 'faucet.yaml')
-        with open(conf_file_name, 'w') as conf_file:
-            conf_file.write(config)
+        """Try to parse config and return True if result fails or succeeds as expected."""
+        conf_files = []
+        if config is not None:
+            conf_file_name = os.path.join(self.tmpdir, 'faucet.yaml')
+            with open(conf_file_name, 'w') as conf_file:
+                conf_file.write(config)
+            conf_files = [conf_file_name]
         with open(os.devnull, 'w') as check_output_file:
             result_ok = check_config( # pylint: disable=unexpected-keyword-arg
-                [conf_file_name], logging.FATAL, check_output_file)
+                conf_files, logging.FATAL, check_output_file)
         return expected_ok == result_ok
 
     def _deprecated_acl_check(self, config, success):
         # TODO: Check acls_in work now acl_in is deprecated, remove in future
-        if 'acl_in' in config and not 'acls_in' in config:
+        if config and 'acl_in' in config and not 'acls_in' in config:
             acls_cfg = re.sub('(acl_in: )(.*)', 'acls_in: [\\2]', config)
             self.assertTrue(self.run_check_config(acls_cfg, success))
 
     def check_config_success(self, config):
+        """Try to parse config and expect success."""
         self.assertTrue(self.run_check_config(config, True))
         self._deprecated_acl_check(config, True)
 
     def check_config_failure(self, config):
+        """Try to parse config and expect failure."""
         self.assertTrue(self.run_check_config(config, False))
         self._deprecated_acl_check(config, False)
 
     def test_no_dps(self):
+        """Test bad config with no DPs."""
         no_dps_conf = """
 vlans:
     100:
@@ -379,6 +388,28 @@ dps:
 """
         self.check_config_success(acl_config)
 
+    def test_multiple_dps(self):
+        """Test multiple DPs."""
+        acl_config = """
+vlans:
+    100:
+        description: "100"
+dps:
+    switch1:
+        dp_id: 0xcafef00d
+        hardware: 'Open vSwitch'
+        interfaces:
+            1:
+                native_vlan: 100
+    switch2:
+        dp_id: 0xcafef00e
+        hardware: 'Open vSwitch'
+        interfaces:
+            1:
+                native_vlan: 100
+"""
+        self.check_config_success(acl_config)
+
     def test_router_resolved_vlans(self):
         """Test that VLANs get resolved by routers."""
         vlan_config = """
@@ -407,6 +438,10 @@ dps:
                 native_vlan: 200
 """
         self.check_config_success(vlan_config)
+
+    def test_no_config_file(self):
+        """Test no config file handled."""
+        self.check_config_failure(None)
 
 
 if __name__ == "__main__":

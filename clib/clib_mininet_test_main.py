@@ -35,17 +35,24 @@ import yaml
 from packaging import version
 
 from concurrencytest import ConcurrentTestSuite, fork_for_tests
-# pylint: disable=import-error
 from mininet.log import setLogLevel
 from mininet.clean import Cleanup
 
 from clib import mininet_test_util
 
+DEFAULT_HARDWARE = 'Open vSwitch'
+
 # Only these hardware types will be tested with meters.
 SUPPORTS_METERS = (
     'Aruba',
     'NoviFlow',
-    'Open vSwitch',
+# TODO: troubleshoot meters in OVS 2.10.0
+#   DEFAULT_HARDWARE,
+    'ZodiacGX',
+)
+
+SUPPORTS_METADATA = (
+    DEFAULT_HARDWARE,
 )
 
 
@@ -58,7 +65,6 @@ EXTERNAL_DEPENDENCIES = (
      r'tcpdump\s+version\s+(\d+\.\d+)\.\d+\n', "4.5"),
     ('nc', ['-h'], 'OpenBSD netcat', '', 0),
     ('vconfig', [], 'the VLAN you are talking about', '', 0),
-    ('2to3', ['--help'], 'Usage: 2to3', '', 0),
     ('fuser', ['-V'], r'fuser \(PSmisc\)',
      r'fuser \(PSmisc\) (\d+\.\d+)\n', "22.0"),
     ('lsof', ['-v'], r'lsof version',
@@ -103,7 +109,7 @@ def import_hw_config():
         sys.exit(-1)
     try:
         with open(config_file_name, 'r') as config_file:
-            config = yaml.load(config_file)
+            config = yaml.safe_load(config_file)
     except IOError:
         print('Could not load YAML config data from %s' % config_file_name)
         sys.exit(-1)
@@ -121,7 +127,7 @@ def import_hw_config():
             'of_port': (int,),
             'gauge_of_port': (int,),
         }
-        for required_key, required_key_types in list(required_config.items()):
+        for required_key, required_key_types in required_config.items():
             if required_key not in config:
                 print('%s must be specified in %s to use HW switch.' % (
                     required_key, config_file_name))
@@ -143,8 +149,7 @@ def import_hw_config():
                   '%d are provided in %s.' %
                   (REQUIRED_TEST_PORTS, len(dp_ports), config_file_name))
         return config
-    else:
-        return None
+    return None
 
 
 def check_dependencies():
@@ -326,25 +331,28 @@ def pipeline_superset_report(decoded_pcap_logs):
 def filter_test_hardware(test_obj, hw_config):
     test_hosts = test_obj.N_TAGGED + test_obj.N_UNTAGGED + test_obj.N_EXTENDED
     test_links = test_hosts * test_obj.LINKS_PER_HOST
-    if hw_config is not None:
+    testing_hardware = hw_config is not None
+    test_hardware = DEFAULT_HARDWARE
+    if testing_hardware:
         test_hardware = hw_config['hardware']
+
+    if test_obj.REQUIRES_METERS and test_hardware not in SUPPORTS_METERS:
+        return False
+
+    if test_obj.REQUIRES_METADATA and test_hardware not in SUPPORTS_METADATA:
+        return False
+
+    if testing_hardware:
         if test_obj.SOFTWARE_ONLY:
             return False
         if test_obj.NUM_DPS > 1:
             # TODO: test other stacking combinations.
             if test_obj.NUM_HOSTS > 2:
                 return False
-        else:
-            if test_links < REQUIRED_TEST_PORTS:
-                if test_hardware == 'ZodiacFX':
-                    return True
-                return False
-        if test_obj.REQUIRES_METERS:
-            if test_hardware not in SUPPORTS_METERS:
-                return False
-    else:
-        if test_obj.NUM_DPS == 1 and test_links < REQUIRED_TEST_PORTS:
-            return False
+
+    if test_obj.NUM_DPS == 1 and test_links < REQUIRED_TEST_PORTS:
+        return False
+
     return True
 
 
@@ -375,7 +383,7 @@ def expand_tests(module, requested_test_classes, excluded_test_classes,
             if test_name.startswith('FaucetSanity'):
                 sanity_test_suites.append(test_suite)
             else:
-                if serial or test_name.startswith('FaucetSingle'):
+                if serial or test_name.startswith('FaucetSingle') or test_obj.NETNS:
                     single_test_suites.append(test_suite)
                 else:
                     parallel_test_suites.append(test_suite)
@@ -459,7 +467,7 @@ def report_tests(test_status, test_list):
     tests_json = {}
     for test_class, test_text in test_list:
         test_text = test_text.replace('\n', '\t')
-        print('\t'.join((test_class.id(), test_status, test_text)))
+        test_text = test_text.replace('"', '\'')
         tests_json.update({
             test_class.id(): {'status': test_status, 'output': test_text}})
     return tests_json
@@ -472,18 +480,18 @@ def report_results(results, hw_config, report_json_filename):
         print('\n')
         print(report_title)
         print('=' * len(report_title))
-        print('\n')
         for result in results:
             test_lists = [
                 ('ERROR', result.errors),
                 ('FAIL', result.failures),
+                ('SKIPPED', result.skipped),
             ]
             if hasattr(result, 'successes'):
                 test_lists.append(
                     ('OK', result.successes))
             for test_status, test_list in test_lists:
                 tests_json.update(report_tests(test_status, test_list))
-        print('\n')
+        print(yaml.dump(tests_json, default_flow_style=False, explicit_start=True, explicit_end=True))
         if report_json_filename:
             report_json = {
                 'hw_config': hw_config,
@@ -498,9 +506,9 @@ def run_test_suites(report_json_filename, hw_config, root_tmpdir,
     print('running %u tests in parallel and %u tests serial' % (
         parallel_tests.countTestCases(), single_tests.countTestCases()))
     results = []
+    results.append(sanity_result)
     results.extend(run_parallel_test_suites(root_tmpdir, resultclass, parallel_tests))
     results.extend(run_single_test_suites(root_tmpdir, resultclass, single_tests))
-    results.append(sanity_result)
     report_results(results, hw_config, report_json_filename)
     successful_results = [result for result in results if result.wasSuccessful()]
     return len(results) == len(successful_results)
@@ -603,6 +611,8 @@ def run_tests(module, hw_config, requested_test_classes, dumpfail,
         all_successful = run_test_suites(
             report_json_filename, hw_config, root_tmpdir,
             resultclass, single_tests, parallel_tests, sanity_result)
+    else:
+        report_results([sanity_result], hw_config, report_json_filename)
     os.remove(ports_sock)
     decoded_pcap_logs = glob.glob(os.path.join(
         os.path.join(root_tmpdir, '*'), '*of.cap.txt'))
