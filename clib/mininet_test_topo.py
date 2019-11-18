@@ -1,5 +1,6 @@
 """Topology components for FAUCET Mininet unit tests."""
 
+from collections import namedtuple
 import os
 import socket
 import string
@@ -7,22 +8,52 @@ import shutil
 import subprocess
 import time
 
+import netifaces
+
 # pylint: disable=too-many-arguments
 
-from mininet.log import output
+from mininet.log import output, warn
 from mininet.topo import Topo
 from mininet.node import Controller
 from mininet.node import CPULimitedHost
 from mininet.node import OVSSwitch
+from mininet.link import TCIntf, Link
 
 from clib import mininet_test_util
 
-import netifaces
+
+# TODO: this should be configurable (e.g for randomization)
+SWITCH_START_PORT = 5
+
+
+class FaucetIntf(TCIntf):
+    """TCIntf that doesn't complain unnecessarily"""
+
+    def delete(self):
+        """Ignore interface deletion failure;
+           this is common after a veth pair has been deleted
+           on the other side."""
+        self.cmd('ip link del', self.name, '|| true')
+        self.node.delIntf(self)
+        self.link = None
+
+
+class FaucetLink(Link):
+    """Link using FaucetIntfs"""
+
+    # TODO: This can be simplified when we update Mininet in the test image
+    def __init__(self, node1, node2, port1=None, port2=None,
+                 intfName1=None, intfName2=None,
+                 addr1=None, addr2=None, **params):
+        Link.__init__(self, node1, node2, port1=port1, port2=port2,
+                      intfName1=intfName1, intfName2=intfName2,
+                      cls1=FaucetIntf, cls2=FaucetIntf,
+                      addr1=addr1, addr2=addr2,
+                      params1=params, params2=params)
+
 
 class FaucetHost(CPULimitedHost):
     """Base Mininet Host class, for Mininet-based tests."""
-
-    pass
 
 
 class FaucetSwitch(OVSSwitch):
@@ -34,8 +65,42 @@ class FaucetSwitch(OVSSwitch):
     }
 
     def __init__(self, name, **params):
-        super(FaucetSwitch, self).__init__(
+        super().__init__(
             name=name, reconnectms=8000, **params)
+
+    @staticmethod
+    def _workaround(args):
+        """Workarounds/hacks for errors resulting from
+           cmd() calls within Mininet"""
+        # Workaround: ignore ethtool errors on tap interfaces
+        # This allows us to use tap tunnels as cables to switch ports,
+        # for example to test against OvS in a VM.
+        if (len(args) > 1 and args[0] == 'ethtool -K' and
+                getattr(args[1], 'name', '').startswith('tap')):
+            return True
+        return False
+
+    def cmd(self, *args, success=0, **kwargs):
+        """Commands typically must succeed for proper switch operation,
+           so we check the exit code of the last command in *args.
+           success: desired exit code (or None to skip check)"""
+        # pylint: disable=arguments-differ
+        cmd_output = super().cmd(*args, **kwargs)
+        exit_code = int(super().cmd('echo $?'))
+        if success is not None and exit_code != success:
+            msg = "%s exited with (%d):'%s'" % (args, exit_code, cmd_output)
+            if self._workaround(args):
+                warn('Ignoring:', msg, '\n')
+            else:
+                raise RuntimeError(msg)
+        return cmd_output
+
+    def attach(self, intf):
+        "Attach an interface and set its port"
+        super().attach(intf)
+        # This should be done in Mininet, but we do it for now
+        port = self.ports[intf]
+        self.cmd('ovs-vsctl set Interface', intf, 'ofport_request=%s' % port)
 
     def start(self, controllers):
         # Transcluded from Mininet source, since need to insert
@@ -86,7 +151,7 @@ class NoControllerFaucetSwitch(FaucetSwitch):
     """A switch without any controllers (typically for remapping hardware to software."""
 
     def start(self, _controllers):
-        super(NoControllerFaucetSwitch, self).start(controllers=[])
+        super().start(controllers=[])
 
 
 class VLANHost(FaucetHost):
@@ -94,10 +159,10 @@ class VLANHost(FaucetHost):
 
     intf_root_name = None
 
-    def config(self, vlan=100, **params):
+    def config(self, vlan=100, **params):  # pylint: disable=arguments-differ
         """Configure VLANHost according to (optional) parameters:
            vlan: VLAN ID for default interface"""
-        super_config = super(VLANHost, self).config(**params)
+        super_config = super().config(**params)
         intf = self.defaultIntf()
         vlan_intf_name = '%s.%d' % (intf, vlan)
         for cmd in (
@@ -119,11 +184,19 @@ class FaucetSwitchTopo(Topo):
     CPUF = 0.5
     DELAY = '1ms'
 
+    def __init__(self, *args, **kwargs):
+        self.dpid_names = {}  # maps dpids to switch names
+        self.switch_dpids = {}  # maps switch names to dpids
+        self.switch_ports = {}  # maps switch names to port lists
+        self.dpid_port_host = {}  # maps switch hosts to ports
+        super().__init__(*args, **kwargs)
+
     @staticmethod
     def _get_sid_prefix(ports_served):
         """Return a unique switch/host prefix for a test."""
         # Linux tools require short interface names.
-        id_chars = string.ascii_letters + string.digits # pytype: disable=module-attr
+        # pytype: disable=module-attr
+        id_chars = ''.join(sorted(string.ascii_letters + string.digits))
         id_a = int(ports_served / len(id_chars))
         id_b = ports_served - (id_a * len(id_chars))
         return '%s%s' % (
@@ -145,46 +218,100 @@ class FaucetSwitchTopo(Topo):
         host_name = 'e%s%1.1u' % (sid_prefix, host_n + 1)
         return self.addHost(name=host_name, cls=e_cls, host_n=host_n, tmpdir=tmpdir)
 
-    def _add_faucet_switch(self, sid_prefix, dpid, ovs_type, switch_cls):
+    def _add_faucet_switch(self, sid_prefix, dpid, hw_dpid, ovs_type):
         """Add a FAUCET switch."""
+        switch_cls = FaucetSwitch
         switch_name = 's%s' % sid_prefix
+        self.switch_dpids[switch_name] = dpid
+        self.dpid_names[dpid] = switch_name
+        if hw_dpid and hw_dpid == dpid:
+            remap_dpid = str(int(dpid) + 1)
+            output('bridging hardware switch DPID %s (%x) dataplane via OVS DPID %s (%x)\n' % (
+                dpid, int(dpid), remap_dpid, int(remap_dpid)))
+            dpid = remap_dpid
+            switch_cls = NoControllerFaucetSwitch
         return self.addSwitch(
             name=switch_name,
             cls=switch_cls,
             datapath=ovs_type,
             dpid=mininet_test_util.mininet_dpid(dpid))
 
-    def _add_links(self, switch, hosts, links_per_host):
+    # Hardware switch port virtualization through
+    # transparent OVS attachment bridge/patch panel
+    #
+    # Since FAUCET is talking to the hardware switch, it needs
+    # to use the hardware switch's OpenFlow ports, rather than
+    # the OpenFlow ports of the (transparent) OVS attachment bridge.
+
+    def hw_remap_port(self, dpid, port):
+        """Map OVS attachment bridge port number -> HW port number if necessary"""
+        if dpid != self.hw_dpid:
+            return port
+        assert self.hw_ports
+        return self.hw_ports[port - self.start_port]
+
+    peer_link = namedtuple('peer_link', 'port peer_dpid peer_port')
+
+    def hw_remap_peer_link(self, dpid, link):
+        """Remap HW port numbers -> OVS port numbers in link if necessary"""
+        port = self.hw_remap_port(dpid, link.port)
+        peer_port = self.hw_remap_port(link.peer_dpid, link.peer_port)
+        return self.peer_link(port, link.peer_dpid, peer_port)
+
+    def dpid_ports(self, dpid):
+        """Return port list for dpid, remapping if necessary"""
+        name = self.dpid_names[dpid]
+        ports = self.switch_ports[name]
+        return [self.hw_remap_port(dpid, port) for port in ports]
+
+    @staticmethod
+    def extend_port_order(port_order=None, max_length=16):
+        """Extend port_order to max_length if needed"""
+        if not port_order:
+            port_order = []
+        return port_order + list(range(len(port_order), max_length + 1))
+
+    def _add_links(self, switch, dpid, hosts, links_per_host):
+        self.switch_ports.setdefault(switch, [])
+        self.dpid_port_host.setdefault(int(dpid), {})
+        index = 0
         for host in hosts:
             for _ in range(links_per_host):
                 # Order of switch/host is important, since host may be in a container.
-                self.addLink(switch, host, delay=self.DELAY, use_htb=True)
+                port = self.start_port + self.port_order[index]
+                self.addLink(switch, host, port1=port, delay=self.DELAY, use_htb=True)
+                # Keep track of switch ports
+                self.switch_ports.setdefault(switch, [])
+                self.switch_ports[switch].append(port)
+                self.dpid_port_host[int(dpid)][port] = host
+                index += 1
+        return index
 
+    # pylint: disable=too-many-locals,arguments-differ
     def build(self, ovs_type, ports_sock, test_name, dpids,
               n_tagged=0, tagged_vid=100, n_untagged=0, links_per_host=0,
-              n_extended=0, e_cls=None, tmpdir=None, hw_dpid=None, host_namespace=None):
+              n_extended=0, e_cls=None, tmpdir=None, hw_dpid=None, switch_map=None,
+              host_namespace=None, start_port=SWITCH_START_PORT, port_order=None,
+              get_serialno=mininet_test_util.get_serialno):
         if not host_namespace:
             host_namespace = {}
-
+        self.hw_dpid = hw_dpid
+        self.hw_ports = sorted(switch_map) if switch_map else []
+        self.start_port = start_port
+        maxlength = n_tagged + n_untagged + n_extended
+        self.port_order = self.extend_port_order(port_order, maxlength)
         for dpid in dpids:
-            serialno = mininet_test_util.get_serialno(
-                ports_sock, test_name)
+            serialno = get_serialno(ports_sock, test_name)
             sid_prefix = self._get_sid_prefix(serialno)
-            for host_n in range(n_tagged):
-                self._add_tagged_host(sid_prefix, tagged_vid, host_n)
-            for host_n in range(n_untagged):
-                self._add_untagged_host(sid_prefix, host_n, host_namespace.get(host_n, True))
-            for host_n in range(n_extended):
-                self._add_extended_host(sid_prefix, host_n, e_cls, tmpdir)
-            switch_cls = FaucetSwitch
-            if hw_dpid and hw_dpid == dpid:
-                remap_dpid = str(int(dpid) + 1)
-                output('bridging hardware switch DPID %s (%x) dataplane via OVS DPID %s (%x)' % (
-                    dpid, int(dpid), remap_dpid, int(remap_dpid)))
-                dpid = remap_dpid
-                switch_cls = NoControllerFaucetSwitch
-            switch = self._add_faucet_switch(sid_prefix, dpid, ovs_type, switch_cls)
-            self._add_links(switch, self.hosts(), links_per_host)
+            tagged = [self._add_tagged_host(sid_prefix, tagged_vid, host_n)
+                      for host_n in range(n_tagged)]
+            untagged = [self._add_untagged_host(
+                sid_prefix, host_n, host_namespace.get(host_n, True))
+                        for host_n in range(n_untagged)]
+            extended = [self._add_extended_host(sid_prefix, host_n, e_cls, tmpdir)
+                        for host_n in range(n_extended)]
+            switch = self._add_faucet_switch(sid_prefix, dpid, hw_dpid, ovs_type)
+            self._add_links(switch, dpid, tagged + untagged + extended, links_per_host)
 
 
 class FaucetStringOfDPSwitchTopo(FaucetSwitchTopo):
@@ -192,10 +319,20 @@ class FaucetStringOfDPSwitchTopo(FaucetSwitchTopo):
 
     switch_to_switch_links = 1
 
+    def dpid_peer_links(self, dpid):
+        """Return peer_link list for dpid, remapping if necessary"""
+        name = self.dpid_names[dpid]
+        links = [self.hw_remap_peer_link(dpid, link) for link in self.switch_peer_links[name]]
+        return links
+
+    # pylint: disable=too-many-locals,arguments-differ
     def build(self, ovs_type, ports_sock, test_name, dpids,
-              n_tagged=0, tagged_vid=100, n_untagged=0,
+              n_tagged=0, tagged_vid=100, untagged_hosts=None,
               links_per_host=0, switch_to_switch_links=1,
-              hw_dpid=None, stack_ring=False):
+              hw_dpid=None, switch_map=None,
+              stack_ring=False, start_port=SWITCH_START_PORT,
+              port_order=None, get_serialno=mininet_test_util.get_serialno):
+
         """
 
                                Hosts
@@ -221,40 +358,52 @@ class FaucetStringOfDPSwitchTopo(FaucetSwitchTopo):
         * (n_tagged + n_untagged + 2) links on switches 0 < n < s-1,
           with final two links being inter-switch
         """
-        def addLinks(src, dst): # pylint: disable=invalid-name
+        def addLinks(src, dst, next_index): # pylint: disable=invalid-name
+            """Add peer links from src switch to dst switch"""
+            self.switch_peer_links.setdefault(src, [])
+            self.switch_peer_links.setdefault(dst, [])
+            dpid1, dpid2 = self.switch_dpids[src], self.switch_dpids[dst]
             for _ in range(self.switch_to_switch_links):
-                self.addLink(src, dst)
+                index1, index2 = next_index[src], next_index[dst]
+                port1, port2 = [self.start_port + self.port_order[i] for i in (index1, index2)]
+                self.addLink(src, dst, port1=port1, port2=port2)
+                # Update port and link lists
+                self.switch_ports[src].append(port1)
+                self.switch_ports[dst].append(port2)
+                self.switch_peer_links[src].append(self.peer_link(port1, dpid2, port2))
+                self.switch_peer_links[dst].append(self.peer_link(port2, dpid1, port1))
+                # Update next indices on src and dest
+                next_index[src] += 1
+                next_index[dst] += 1
 
-        first_switch = None
-        last_switch = None
+        n_untagged_hosts = sum(untagged_hosts.values()) if untagged_hosts else 0
+        self.hw_dpid = hw_dpid
+        self.hw_ports = sorted(switch_map) if switch_map else []
+        self.start_port = start_port
         self.switch_to_switch_links = switch_to_switch_links
+        max_ports = (n_tagged + n_untagged_hosts) * links_per_host + 2*switch_to_switch_links
+        self.port_order = self.extend_port_order(port_order, max_ports)
+        self.switch_peer_links = {}
+
+        first_switch, last_switch, next_index = None, None, {}
         for dpid in dpids:
-            serialno = mininet_test_util.get_serialno(
-                ports_sock, test_name)
+            serialno = get_serialno(ports_sock, test_name)
             sid_prefix = self._get_sid_prefix(serialno)
-            hosts = []
-            for host_n in range(n_tagged):
-                hosts.append(self._add_tagged_host(sid_prefix, tagged_vid, host_n))
-            for host_n in range(n_untagged):
-                hosts.append(self._add_untagged_host(sid_prefix, host_n))
-            switch_cls = FaucetSwitch
-            if hw_dpid and hw_dpid == dpid:
-                remap_dpid = str(int(dpid) + 1)
-                output('bridging hardware switch DPID %s (%x) dataplane via OVS DPID %s (%x)' % (
-                    dpid, int(dpid), remap_dpid, int(remap_dpid)))
-                dpid = remap_dpid
-                switch_cls = NoControllerFaucetSwitch
-            switch = self._add_faucet_switch(sid_prefix, dpid, ovs_type, switch_cls)
-            self._add_links(switch, hosts, links_per_host)
+            tagged = [self._add_tagged_host(sid_prefix, tagged_vid, host_n)
+                      for host_n in range(n_tagged)]
+            untagged = [self._add_untagged_host(sid_prefix, host_n)
+                        for host_n in range(n_untagged_hosts)]
+            switch = self._add_faucet_switch(sid_prefix, dpid, hw_dpid, ovs_type)
+            next_index[switch] = self._add_links(switch, dpid, tagged + untagged, links_per_host)
             if first_switch is None:
                 first_switch = switch
-            if last_switch is not None:
+            else:
                 # Add a switch-to-switch link with the previous switch,
                 # if this isn't the first switch in the topology.
-                addLinks(last_switch, switch)
+                addLinks(last_switch, switch, next_index)
             last_switch = switch
         if stack_ring:
-            addLinks(first_switch, last_switch)
+            addLinks(first_switch, last_switch, next_index)
 
 
 class BaseFAUCET(Controller):
@@ -263,6 +412,7 @@ class BaseFAUCET(Controller):
     # Set to True to have cProfile output to controller log.
     CPROFILE = False
     controller_intf = None
+    controller_ipv6 = False
     controller_ip = None
     pid_file = None
     tmpdir = None
@@ -282,18 +432,23 @@ maximum_unreplied_echo_requests=5
 socket_timeout=15
 """
 
-    def __init__(self, name, tmpdir, controller_intf=None, cargs='', **kwargs):
+    def __init__(self, name, tmpdir, controller_intf=None, controller_ipv6=False,
+                 cargs='', **kwargs):
         name = '%s-%u' % (name, os.getpid())
         self.tmpdir = tmpdir
         self.controller_intf = controller_intf
-        super(BaseFAUCET, self).__init__(
+        self.controller_ipv6 = controller_ipv6
+        super().__init__(
             name, cargs=self._add_cargs(cargs, name), **kwargs)
 
     def _add_cargs(self, cargs, name):
         ofp_listen_host_arg = ''
         if self.controller_intf is not None:
+            socket_type = socket.AF_INET
+            if self.controller_ipv6:
+                socket_type = socket.AF_INET6
             self.controller_ip = netifaces.ifaddresses( # pylint: disable=c-extension-no-member
-                self.controller_intf)[socket.AF_INET][0]['addr']
+                self.controller_intf)[socket_type][0]['addr']
             ofp_listen_host_arg = '--ryu-ofp-listen-host=%s' % self.controller_ip
         self.pid_file = os.path.join(self.tmpdir, name + '.pid')
         pid_file_arg = '--ryu-pid-file=%s' % self.pid_file
@@ -304,10 +459,10 @@ socket_timeout=15
         return ' '.join((
             self.BASE_CARGS, pid_file_arg, ryu_conf_arg, ofp_listen_host_arg, cargs))
 
-    def IP(self): # pylint: disable=invalid-name
+    def IP(self):  # pylint: disable=invalid-name,arguments-differ
         if self.controller_intf is not None:
             return self.controller_ip
-        return super(BaseFAUCET, self).IP()
+        return super().IP()
 
     def _start_tcpdump(self):
         """Start a tcpdump for OF port."""
@@ -419,7 +574,7 @@ socket_timeout=15
     def start(self):
         """Start tcpdump for OF port and then start controller."""
         self._start_tcpdump()
-        super(BaseFAUCET, self).start()
+        super().start()
 
     def _stop_cap(self):
         """Stop tcpdump for OF port and run tshark to decode it."""
@@ -439,7 +594,7 @@ socket_timeout=15
                     stderr=mininet_test_util.DEVNULL,
                     close_fds=True)
 
-    def stop(self):
+    def stop(self):  # pylint: disable=arguments-differ
         """Stop controller."""
         try:
             if self.CPROFILE:
@@ -449,7 +604,7 @@ socket_timeout=15
         except ProcessLookupError:
             pass
         self._stop_cap()
-        super(BaseFAUCET, self).stop()
+        super().stop()
         if os.path.exists(self.logname()):
             tmpdir_logname = os.path.join(
                 self.tmpdir, os.path.basename(self.logname()))
@@ -463,7 +618,8 @@ class FAUCET(BaseFAUCET):
 
     START_ARGS = ['--ryu-app=ryu.app.ofctl_rest']
 
-    def __init__(self, name, tmpdir, controller_intf, env,
+    # pylint: disable=too-many-locals
+    def __init__(self, name, tmpdir, controller_intf, controller_ipv6, env,
                  ctl_privkey, ctl_cert, ca_certs,
                  ports_sock, prom_port, port, test_name, **kwargs):
         self.prom_port = prom_port
@@ -473,10 +629,11 @@ class FAUCET(BaseFAUCET):
             '--ryu-wsapi-host=%s' % mininet_test_util.LOCALHOSTV6,
             '--ryu-wsapi-port=%u' % self.ofctl_port,
             self._tls_cargs(port, ctl_privkey, ctl_cert, ca_certs)))
-        super(FAUCET, self).__init__(
+        super().__init__(
             name,
             tmpdir,
             controller_intf,
+            controller_ipv6,
             cargs=cargs,
             command=self._command(env, tmpdir, name, ' '.join(self.START_ARGS)),
             port=port,
@@ -486,19 +643,19 @@ class FAUCET(BaseFAUCET):
         return (
             self.listen_port(self.ofctl_port) and
             self.listen_port(self.prom_port) and
-            super(FAUCET, self).listening())
+            super().listening())
 
 
 class Gauge(BaseFAUCET):
     """Start a Gauge controller."""
 
-    def __init__(self, name, tmpdir, controller_intf, env,
+    def __init__(self, name, tmpdir, controller_intf, controller_ipv6, env,
                  ctl_privkey, ctl_cert, ca_certs,
                  port, **kwargs):
-        super(Gauge, self).__init__(
+        super().__init__(
             name,
             tmpdir,
-            controller_intf,
+            controller_intf, controller_ipv6,
             cargs=self._tls_cargs(port, ctl_privkey, ctl_cert, ca_certs),
             command=self._command(env, tmpdir, name, '--gauge'),
             port=port,

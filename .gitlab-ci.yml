@@ -5,7 +5,7 @@ stages:
 
 build-package:
   stage: build-package
-  image: faucet/dbuilder
+  image: faucet/dbuilder:3.0.3
   script:
     - apt-get update && apt-get upgrade -y
     - mk-build-deps -i -r -t 'apt-get -f -y --force-yes'
@@ -23,7 +23,7 @@ build-package:
 
 deploy-package:
   stage: deploy-package
-  image: faucet/dbuilder
+  image: faucet/dbuilder:3.0.3
   script:
     - cd built-packages/
     - ../gitlab/deploy_deb.sh
@@ -32,7 +32,7 @@ deploy-package:
 
 build-vm-image:
   stage: build-image
-  image: faucet/dbuilder
+  image: faucet/dbuilder:3.0.3
   script:
     - cd images/vm/
     - apt-get update && apt-get upgrade -y
@@ -51,14 +51,14 @@ build-vm-image:
 
 build-rpi-image:
   stage: build-image
-  image: faucet/dbuilder
+  image: faucet/dbuilder:3.0.3
   script:
     - cd images/raspbian/
     - apt-get update && apt-get upgrade -y
     - apt-get install -y quilt parted manpages-pl xxd qemu-user-static debootstrap zerofree pxz zip dosfstools bsdtar libcap2-bin grep rsync xz-utils binfmt-support
     - git clone https://github.com/RPi-Distro/pi-gen.git
     - cd pi-gen
-    - git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+    - git checkout tags/2018-11-13-raspbian-stretch
     - mv ../prerun.sh ./export-image/
     - mv ../common ./scripts/
     - mv ../02-run.sh ./stage2/01-sys-tweaks/

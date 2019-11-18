@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import struct
 from netaddr import EUI
 
 from ryu.lib import addrconv
-from ryu.lib.mac import BROADCAST, is_multicast, haddr_to_bin
+from ryu.lib.mac import BROADCAST, DONTCARE, is_multicast, haddr_to_bin
 from ryu.lib.packet import (
     arp, bpdu, ethernet,
     icmp, icmpv6, ipv4, ipv6,
@@ -36,15 +36,17 @@ from faucet import valve_of
 FAUCET_MAC = '0e:00:00:00:00:01' # Default FAUCET MAC address
 
 ETH_HEADER_SIZE = 14
-ETH_VLAN_HEADER_SIZE = ETH_HEADER_SIZE + 4 # https://en.wikipedia.org/wiki/IEEE_802.1Q#Frame_format
-IPV4_HEADER_SIZE = 20 # https://en.wikipedia.org/wiki/IPv4#Header
-ICMP_ECHO_REQ_SIZE = 8 + 64 # https://en.wikipedia.org/wiki/Ping_(networking_utility)#ICMP_packet
-IPV6_HEADER_SIZE = 40 # https://en.wikipedia.org/wiki/IPv6_packet#Fixed_header
+ETH_VLAN_HEADER_SIZE = ETH_HEADER_SIZE + 4  # https://en.wikipedia.org/wiki/IEEE_802.1Q#Frame_format
+IPV4_HEADER_SIZE = 20  # https://en.wikipedia.org/wiki/IPv4#Header
+ICMP_ECHO_REQ_SIZE = 8 + 128  # https://en.wikipedia.org/wiki/Ping_(networking_utility)#ICMP_packet
+ICMP6_ECHO_REQ_SIZE = 8 + 128  # https://en.wikipedia.org/wiki/Ping_(networking_utility)#ICMP_packet
+IPV6_HEADER_SIZE = 40  # https://en.wikipedia.org/wiki/IPv6_packet#Fixed_header
 ARP_REQ_PKT_SIZE = 28
-ARP_PKT_SIZE = 46 # https://en.wikipedia.org/wiki/Address_Resolution_Protocol#Packet_structure
+ARP_PKT_SIZE = 46  # https://en.wikipedia.org/wiki/Address_Resolution_Protocol#Packet_structure
 VLAN_ARP_REQ_PKT_SIZE = ETH_VLAN_HEADER_SIZE + ARP_REQ_PKT_SIZE
 VLAN_ARP_PKT_SIZE = ETH_VLAN_HEADER_SIZE + ARP_PKT_SIZE
 VLAN_ICMP_ECHO_REQ_SIZE = ETH_VLAN_HEADER_SIZE + IPV4_HEADER_SIZE + ICMP_ECHO_REQ_SIZE
+VLAN_ICMP6_ECHO_REQ_SIZE = ETH_VLAN_HEADER_SIZE + IPV6_HEADER_SIZE + ICMP6_ECHO_REQ_SIZE
 
 ETH_EAPOL = 0x888e
 EAPOL_ETH_DST = '01:80:c2:00:00:03'
@@ -187,6 +189,18 @@ def parse_packet_in_pkt(data, max_len, eth_pkt=None, vlan_pkt=None):
         pass
 
     return (pkt, eth_pkt, eth_type, vlan_pkt, vlan_vid)
+
+
+def mac_addr_all_zeros(mac_addr):
+    """Returns True if mac_addr is all zeros.
+
+    Args:
+        mac_addr (str): MAC address.
+    Returns:
+        bool: True if all zeros.
+    """
+    mac_bin = haddr_to_bin(mac_addr)
+    return mac_bin == DONTCARE
 
 
 def mac_addr_is_unicast(mac_addr):
@@ -347,10 +361,21 @@ def parse_faucet_lldp(lldp_pkt, faucet_dp_mac):
     return (remote_dp_id, remote_dp_name, remote_port_id, remote_port_state)
 
 
+def lacp_actor_up(lacp_pkt):
+    """Return 1 if remote LACP link is up."""
+    if (lacp_pkt.actor_state_synchronization and
+            lacp_pkt.actor_state_collecting and
+            lacp_pkt.actor_state_distributing):
+        return 1
+    return 0
+
+
 def lacp_reqreply(eth_src,
                   actor_system, actor_key, actor_port,
                   actor_state_synchronization=0,
                   actor_state_activity=0,
+                  actor_state_collecting=1,
+                  actor_state_distributing=1,
                   partner_system='00:00:00:00:00:00',
                   partner_key=0,
                   partner_port=0,
@@ -373,6 +398,8 @@ def lacp_reqreply(eth_src,
         actor_port (int): actor port number.
         actor_state_synchronization (int): 1 if we will use this link.
         actor_state_activity (int): 1 if actively sending LACP.
+        actor_state_collecting (int): 1 if receiving on this link.
+        actor_state_distibuting (int): 1 if transmitting on this link.
         partner_system (str): partner system ID (MAC address)
         partner_key (int): partner's LACP key assigned to this port.
         partner_port (int): partner port number.
@@ -409,9 +436,9 @@ def lacp_reqreply(eth_src,
         partner_state_expired=partner_state_expired,
         actor_state_timeout=1,
         partner_state_timeout=partner_state_timeout,
-        actor_state_collecting=1,
+        actor_state_collecting=actor_state_collecting,
         partner_state_collecting=partner_state_collecting,
-        actor_state_distributing=1,
+        actor_state_distributing=actor_state_distributing,
         partner_state_distributing=partner_state_distributing,
         actor_state_aggregation=1,
         partner_state_aggregation=partner_state_aggregation,
@@ -718,8 +745,8 @@ class PacketMeta:
         vlan_msg = ''
         if self.vlan:
             vlan_msg = 'VLAN %u' % self.vlan.vid
-        return '%s (L2 type 0x%4.4x, L3 src %s, L3 dst %s) %s %s' % (
-            self.eth_src, self.eth_type, self.l3_src, self.l3_dst,
+        return '%s (L2 type 0x%4.4x, L2 dst %s, L3 src %s, L3 dst %s) %s %s' % (
+            self.eth_src, self.eth_type, self.eth_dst, self.l3_src, self.l3_dst,
             self.port, vlan_msg)
 
     def reparse(self, max_len):

@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -87,7 +87,8 @@ class Conf:
     def _check_conf_types(self, conf, conf_types):
         """Check that conf value is of the correct type."""
         test_config_condition(not isinstance(conf, dict), (
-            'Conf object must be type %s not %s' % (dict, type(conf))))
+            'Conf object %s contents %s must be type %s not %s' % (
+                self._id, conf, dict, type(conf))))
         for conf_key, conf_value in conf.items():
             test_config_condition(
                 conf_key not in conf_types, '%s field unknown in %s (known types %s)' % (
@@ -133,10 +134,13 @@ class Conf:
             conf_keys.append((key, value))
         return conf_keys
 
+    @staticmethod
+    def _conf_dyn_keys(conf):
+        return [(key, value) for key, value in conf.__dict__.items() if key.startswith('dyn')]
+
     def merge_dyn(self, other_conf):
         """Merge dynamic state from other conf object."""
-        self.__dict__.update(
-            {k: v for k, v in self._conf_keys(other_conf, dyn=True)})
+        self.__dict__.update({k: v for k, v in self._conf_dyn_keys(other_conf)})
 
     def _str_conf(self, conf_v):
         if isinstance(conf_v, (bool, str, int)):
@@ -213,7 +217,11 @@ class Conf:
     @staticmethod
     def _check_ip_str(ip_str, ip_method=ipaddress.ip_address):
         try:
-            return ip_method(ip_str)
+            # bool type is deprecated by the library ipaddress
+            if not isinstance(ip_str, bool):
+                return ip_method(ip_str)
+            else:
+                raise InvalidConfigError('Invalid IP address %s: IP address of type bool' % (ip_str))
         except (ValueError, AttributeError, TypeError) as err:
             raise InvalidConfigError('Invalid IP address %s: %s' % (ip_str, err))
 

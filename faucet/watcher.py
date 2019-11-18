@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,14 +18,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import json
-import time
 import gzip
+import time
 
+from ryu.ofproto import ofproto_v1_3 as ofp
+
+from faucet.conf import InvalidConfigError
 from faucet.valve_util import dpid_log
-from faucet.gauge_influx import GaugePortStateInfluxDBLogger, GaugePortStatsInfluxDBLogger, GaugeFlowTableInfluxDBLogger
-from faucet.gauge_pollers import GaugePortStatePoller, GaugePortStatsPoller, GaugeFlowTablePoller
-from faucet.gauge_prom import GaugePortStatsPrometheusPoller, GaugePortStatePrometheusPoller, GaugeFlowTablePrometheusPoller
+from faucet.gauge_influx import (
+    GaugePortStateInfluxDBLogger, GaugePortStatsInfluxDBLogger, GaugeFlowTableInfluxDBLogger)
+from faucet.gauge_pollers import (
+    GaugePortStatePoller, GaugePortStatsPoller, GaugeFlowTablePoller, GaugeMeterStatsPoller)
+from faucet.gauge_prom import (
+    GaugePortStatsPrometheusPoller, GaugePortStatePrometheusPoller, GaugeFlowTablePrometheusPoller,
+    GaugeMeterStatsPrometheusPoller)
 
 
 def watcher_factory(conf):
@@ -51,27 +59,27 @@ def watcher_factory(conf):
             'influx': GaugeFlowTableInfluxDBLogger,
             'prometheus': GaugeFlowTablePrometheusPoller,
             },
+        'meter_stats': {
+            'text': GaugeMeterStatsLogger,
+            'prometheus': GaugeMeterStatsPrometheusPoller,
+            },
     }
 
     w_type = conf.type
     db_type = conf.db_type
-    if w_type in WATCHER_TYPES and db_type in WATCHER_TYPES[w_type]:
+    try:
         return WATCHER_TYPES[w_type][db_type]
-    return None
-
-
-def _rcv_time(rcv_time):
-    return time.strftime('%b %d %H:%M:%S', time.localtime(rcv_time))
+    except KeyError:
+        raise InvalidConfigError('invalid water config')
 
 
 class GaugePortStateLogger(GaugePortStatePoller):
     """Abstraction for port state logger."""
 
-    def update(self, rcv_time, dp_id, msg):
-        rcv_time_str = _rcv_time(rcv_time)
+    def _update(self, rcv_time, msg):
+        rcv_time_str = self._rcv_time(rcv_time)
         reason = msg.reason
         port_no = msg.desc.port_no
-        ofp = msg.datapath.ofproto
         log_msg = 'port %s unknown state %s' % (port_no, reason)
         if reason == ofp.OFPPR_ADD:
             log_msg = 'port %s added' % port_no
@@ -83,7 +91,7 @@ class GaugePortStateLogger(GaugePortStatePoller):
                 log_msg = 'port %s down' % port_no
             else:
                 log_msg = 'port %s up' % port_no
-        log_msg = '%s %s' % (dpid_log(dp_id), log_msg)
+        log_msg = '%s %s' % (dpid_log(self.dp.dp_id), log_msg)
         self.logger.info(log_msg)
         if self.conf.file:
             with open(self.conf.file, 'a') as logfile:
@@ -103,24 +111,26 @@ class GaugePortStateLogger(GaugePortStatePoller):
 class GaugePortStatsLogger(GaugePortStatsPoller):
     """Abstraction for port statistics logger."""
 
-    @staticmethod
-    def _update_line(rcv_time_str, stat_name, stat_val):
-        return '\t'.join((rcv_time_str, stat_name, str(stat_val))) + '\n'
+    def _dp_stat_name(self, stat, stat_name):  # pylint: disable=arguments-differ
+        port_name = self.dp.port_labels(stat.port_no)['port']
+        return '-'.join((self.dp.name, port_name, stat_name))
 
-    def update(self, rcv_time, dp_id, msg):
-        super(GaugePortStatsLogger, self).update(rcv_time, dp_id, msg)
-        rcv_time_str = _rcv_time(rcv_time)
-        for stat in msg.body:
-            port_name = self.dp.port_labels(stat.port_no)['port']
-            with open(self.conf.file, 'a') as logfile:
-                log_lines = []
-                for stat_name, stat_val in self._format_port_stats('-', stat):
-                    dp_port_name = '-'.join((
-                        self.dp.name, port_name, stat_name))
-                    log_lines.append(
-                        self._update_line(
-                            rcv_time_str, dp_port_name, stat_val))
-                logfile.writelines(log_lines)
+
+class GaugeMeterStatsLogger(GaugeMeterStatsPoller):
+    """Abstraction for meter statistics logger."""
+
+    def _format_stat_pairs(self, delim, stat):
+        band_stats = stat.band_stats[0]
+        stat_pairs = (
+            (('flow', 'count'), stat.flow_count),
+            (('byte', 'in', 'count'), stat.byte_in_count),
+            (('packet', 'in', 'count'), stat.packet_in_count),
+            (('byte', 'band', 'count'), band_stats.byte_band_count),
+            (('packet', 'band', 'count'), band_stats.packet_band_count))
+        return self._format_stats(delim, stat_pairs)
+
+    def _dp_stat_name(self, stat, stat_name):  # pylint: disable=arguments-differ
+        return '-'.join((self.dp.name, str(stat.meter_id), stat_name))
 
 
 class GaugeFlowTableLogger(GaugeFlowTablePoller):
@@ -134,19 +144,28 @@ class GaugeFlowTableLogger(GaugeFlowTablePoller):
     config for this watcher
     """
 
-    def update(self, rcv_time, dp_id, msg):
-        super(GaugeFlowTableLogger, self).update(rcv_time, dp_id, msg)
-        #TODO: it might be good to aggregate all OFFlowStatsReplies somehow
-        rcv_time_str = _rcv_time(rcv_time)
-        jsondict = {}
-        jsondict['time'] = rcv_time_str
-        jsondict['ref'] = '-'.join((self.dp.name, 'flowtables'))
-        jsondict['msg'] = msg.to_jsondict()
-        filename = self.conf.file
-        outstr = '---\n{}\n'.format(json.dumps(jsondict))
+    def _rcv_time(self, rcv_time):
+        # Use ISO8601 times for filenames
+        return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(rcv_time))
+
+    def _update(self, rcv_time, msg):
+        rcv_time_str = self._rcv_time(rcv_time)
+        path = self.conf.path
+        # Double Hyphen to avoid confusion with ISO8601 times
+        filename = os.path.join(
+            path,
+            "{}--flowtable--{}.json".format(self.dp.name, rcv_time_str)
+            )
+        # Add an increment for dealing with parts of a multipart message
+        # arriving at the same time
+        inc = 1
+        while os.path.isfile(filename):
+            filename = os.path.join(path, "{}--flowtable--{}--{}.json".format(
+                self.dp.name, rcv_time_str, inc))
+
         if self.conf.compress:
-            with gzip.open(filename, 'at') as outfile:
-                outfile.write(outstr)
+            with gzip.open(filename, 'wt') as outfile:
+                outfile.write(json.dumps(msg.to_jsondict()))
         else:
-            with open(filename, 'a') as outfile:
-                outfile.write(outstr)
+            with open(filename, 'w') as outfile:
+                json.dump(msg.to_jsondict(), outfile, indent=2)

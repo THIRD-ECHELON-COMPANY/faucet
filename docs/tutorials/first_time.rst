@@ -223,7 +223,6 @@ of a single switch with two ports.
                                       'number': 1,
                                       'opstatus_reconf': True,
                                       'output_only': False,
-                                      'override_output_port': None,
                                       'permanent_learn': False,
                                       'receive_lldp': False,
                                       'stack': OrderedDict(),
@@ -248,7 +247,6 @@ of a single switch with two ports.
                                       'number': 2,
                                       'opstatus_reconf': True,
                                       'output_only': False,
-                                      'override_output_port': None,
                                       'permanent_learn': False,
                                       'receive_lldp': False,
                                       'stack': OrderedDict(),
@@ -382,11 +380,14 @@ production-grade software switch with very good OpenFlow support.
        First let's define some useful bash functions by coping and pasting the
        following definitions into our bash terminal:
 
+       .. literalinclude:: ../_static/tutorial/as_ns
+          :language: bash
+
        .. literalinclude:: ../_static/tutorial/create_ns
           :language: bash
 
-       .. literalinclude:: ../_static/tutorial/as_ns
-          :language: bash
+       NOTE: all the tutorial helper functions can be defined by sourcing
+       ``helper-funcs`` into your shell enviroment.
 
        Now we will create ``host1`` and ``host2`` and assign them some IPs:
 

@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import collections
+import copy
 import re
 
 from faucet import config_parser_util
@@ -38,20 +38,23 @@ V2_TOP_CONFS = (
     'vlans')
 
 
-def dp_parser(config_file, logname):
+def dp_parser(config_file, logname, meta_dp_state=None):
     """Parse a config file into DP configuration objects with hashes of config include/files."""
-    conf = config_parser_util.read_config(config_file, logname)
+    conf, _ = config_parser_util.read_config(config_file, logname)
     config_hashes = None
     dps = None
 
     test_config_condition(conf is None, 'Config file is empty')
-    test_config_condition(not isinstance(conf, dict), 'Config file does not have valid syntax')
+    test_config_condition(
+        not isinstance(conf, dict),
+        'Config file does not have valid syntax')
     version = conf.pop('version', 2)
     test_config_condition(version != 2, 'Only config version 2 is supported')
-    config_hashes, dps = _config_parser_v2(config_file, logname)
+    config_hashes, config_contents, dps, top_conf = _config_parser_v2(
+        config_file, logname, meta_dp_state)
     test_config_condition(dps is None, 'no DPs are not defined')
 
-    return config_hashes, dps
+    return config_hashes, config_contents, dps, top_conf
 
 
 def _get_vlan_by_key(dp_id, vlan_key, vlans):
@@ -87,7 +90,7 @@ def _dp_parse_port(dp_id, port_key, port_conf, vlans):
     return port
 
 
-def _dp_add_ports(dp, dp_conf, dp_id, vlans):
+def _dp_add_ports(dp, dp_conf, dp_id, vlans): # pylint: disable=invalid-name
     ports_conf = dp_conf.get('interfaces', {})
     port_ranges_conf = dp_conf.get('interface_ranges', {})
     # as users can config port VLAN by using VLAN name, we store vid in
@@ -141,122 +144,142 @@ def _dp_add_ports(dp, dp_conf, dp_id, vlans):
     dp.reset_refs(vlans=vlans)
 
 
+def _parse_acls(dp, acls_conf): # pylint: disable=invalid-name
+    for acl_key, acl_conf in acls_conf.items():
+        acl = ACL(acl_key, dp.dp_id, acl_conf)
+        dp.add_acl(acl_key, acl)
+
+
+def _parse_routers(dp, routers_conf): # pylint: disable=invalid-name
+    for router_key, router_conf in routers_conf.items():
+        router = Router(router_key, dp.dp_id, router_conf)
+        dp.add_router(router_key, router)
+
+
+def _parse_meters(dp, meters_conf): # pylint: disable=invalid-name
+    for meter_key, meter_conf in meters_conf.items():
+        meter = Meter(meter_key, dp.dp_id, meter_conf)
+        dp.meters[meter_key] = meter
+
+
 def _parse_dp(dp_key, dp_conf, acls_conf, meters_conf, routers_conf, vlans_conf):
-    test_config_condition(not isinstance(dp_conf, dict), '')
+    test_config_condition(not isinstance(dp_conf, dict), 'DP config must be dict')
     dp = DP(dp_key, dp_conf.get('dp_id', None), dp_conf)
     test_config_condition(dp.name != dp_key, (
         'DP key %s and DP name must match' % dp_key))
-    dp_id = dp.dp_id
     vlans = {}
     vids = set()
     for vlan_key, vlan_conf in vlans_conf.items():
-        vlan = VLAN(vlan_key, dp_id, vlan_conf)
+        vlan = VLAN(vlan_key, dp.dp_id, vlan_conf)
         test_config_condition(str(vlan_key) not in (str(vlan.vid), vlan.name), (
             'VLAN %s key must match VLAN name or VLAN VID' % vlan_key))
         test_config_condition(vlan.vid in vids, (
             'VLAN VID %u multiply configured' % vlan.vid))
         vlans[vlan_key] = vlan
         vids.add(vlan.vid)
-    for acl_key, acl_conf in acls_conf.items():
-        acl = ACL(acl_key, dp_id, acl_conf)
-        dp.add_acl(acl_key, acl)
-    for router_key, router_conf in routers_conf.items():
-        router = Router(router_key, dp_id, router_conf)
-        dp.add_router(router_key, router)
-    for meter_key, meter_conf in meters_conf.items():
-        meter = Meter(meter_key, dp_id, meter_conf)
-        dp.meters[meter_key] = meter
-    _dp_add_ports(dp, dp_conf, dp_id, vlans)
+    _parse_acls(dp, acls_conf)
+    _parse_routers(dp, routers_conf)
+    _parse_meters(dp, meters_conf)
+    _dp_add_ports(dp, dp_conf, dp.dp_id, vlans)
     return dp
 
 
-def _dp_parser_v2(acls_conf, dps_conf, meters_conf,
-                  routers_conf, vlans_conf):
+def _dp_parser_v2(dps_conf, acls_conf, meters_conf,
+                  routers_conf, vlans_conf, meta_dp_state):
 
-    dps = [_parse_dp(dp_key, dp_conf, acls_conf, meters_conf, routers_conf, vlans_conf)
-           for dp_key, dp_conf in dps_conf.items()]
+    dps = []
+    for dp_key, dp_conf in dps_conf.items():
+        try:
+            dps.append(_parse_dp(
+                dp_key, dp_conf, acls_conf, meters_conf, routers_conf, vlans_conf))
+        except InvalidConfigError as err:
+            raise InvalidConfigError('DP %s: %s' % (dp_key, err))
+
     for dp in dps:
         dp.finalize_config(dps)
     for dp in dps:
-        dp.resolve_stack_topology(dps)
-
-    router_ref_dps = collections.defaultdict(set)
+        dp.resolve_stack_topology(dps, meta_dp_state)
     for dp in dps:
-        for router in dp.routers.keys():
-            router_ref_dps[router].add(dp)
-    for router in routers_conf.keys():
-        test_config_condition(not router_ref_dps[router], (
+        dp.finalize()
+
+    dpid_refs = set()
+    for dp in dps:
+        test_config_condition(dp.dp_id in dpid_refs, (
+            'DPID %u is duplicated' % dp.dp_id))
+        dpid_refs.add(dp.dp_id)
+
+    routers_referenced = set()
+    for dp in dps:
+        routers_referenced.update(dp.routers.keys())
+    for router in routers_conf:
+        test_config_condition(router not in routers_referenced, (
             'router %s configured but not used by any DP' % router))
 
     return dps
 
 
-def _config_parser_v2(config_file, logname):
+def dp_preparsed_parser(top_confs, meta_dp_state):
+    """Parse a preparsed (after include files have been applied) FAUCET config."""
+    local_top_confs = copy.deepcopy(top_confs)
+    return _dp_parser_v2(
+        local_top_confs.get('dps', {}),
+        local_top_confs.get('acls', {}),
+        local_top_confs.get('meters', {}),
+        local_top_confs.get('routers', {}),
+        local_top_confs.get('vlans', {}),
+        meta_dp_state)
+
+
+def _config_parser_v2(config_file, logname, meta_dp_state):
     config_path = config_parser_util.dp_config_path(config_file)
-    top_confs = {}
+    top_confs = {top_conf: {} for top_conf in V2_TOP_CONFS}
     config_hashes = {}
+    config_contents = {}
     dps = None
-    for top_conf in V2_TOP_CONFS:
-        top_confs[top_conf] = {}
 
     if not config_parser_util.dp_include(
-            config_hashes, config_path, logname, top_confs):
+            config_hashes, config_contents, config_path, logname, top_confs):
         raise InvalidConfigError('Error found while loading config file: %s' % config_path)
 
     if not top_confs['dps']:
         raise InvalidConfigError('DPs not configured in file: %s' % config_path)
 
-    dps = _dp_parser_v2(
-        top_confs['acls'],
-        top_confs['dps'],
-        top_confs['meters'],
-        top_confs['routers'],
-        top_confs['vlans'])
-    return (config_hashes, dps)
-
-
-def get_config_for_api(valves):
-    """Return config as dict for all DPs."""
-    config = {}
-    for i in V2_TOP_CONFS:
-        config[i] = {}
-    for valve in valves.values():
-        valve_conf = valve.get_config_dict()
-        for i in V2_TOP_CONFS:
-            if i in valve_conf:
-                config[i].update(valve_conf[i])
-    return config
+    dps = dp_preparsed_parser(top_confs, meta_dp_state)
+    return (config_hashes, config_contents, dps, top_confs)
 
 
 def watcher_parser(config_file, logname, prom_client):
     """Return Watcher instances from config."""
-    conf = config_parser_util.read_config(config_file, logname)
-    return _watcher_parser_v2(conf, logname, prom_client)
+    conf, _ = config_parser_util.read_config(config_file, logname)
+    conf_hash = config_parser_util.config_file_hash(config_file)
+    faucet_config_files, faucet_conf_hashes, result = _watcher_parser_v2(
+        conf, logname, prom_client)
+    return conf_hash, faucet_config_files, faucet_conf_hashes, result
 
 
-def _parse_dps_for_watchers(conf, logname):
-    dps = {}
-    if 'faucet_configs' in conf:
-        for faucet_file in conf['faucet_configs']:
-            _, dp_list = dp_parser(faucet_file, logname)
-            if dp_list:
-                for dp in dp_list:
-                    dps[dp.name] = dp
+def _parse_dps_for_watchers(conf, logname, meta_dp_state=None):
+    all_dps_list = []
+    faucet_conf_hashes = {}
 
-    if 'faucet' in conf:
-        faucet_conf = conf['faucet']
-        acls = faucet_conf.get('acls', {})
-        fct_dps = faucet_conf.get('dps', {})
-        meters = faucet_conf.get('meters', {})
-        routers = faucet_conf.get('routers', {})
-        vlans = faucet_conf.get('vlans', {})
-        for dp in _dp_parser_v2(acls, fct_dps, meters, routers, vlans):
-            dps[dp.name] = dp
+    if not isinstance(conf, dict):
+        raise InvalidConfigError('Gauge config not valid')
 
+    faucet_config_files = conf.get('faucet_configs', [])
+    for faucet_config_file in faucet_config_files:
+        conf_hashes, _, dp_list, _ = dp_parser(faucet_config_file, logname)
+        if dp_list:
+            faucet_conf_hashes[faucet_config_file] = conf_hashes
+            all_dps_list.extend(dp_list)
+
+    faucet_config = conf.get('faucet', None)
+    if faucet_config:
+        all_dps_list.extend(dp_preparsed_parser(faucet_config, meta_dp_state))
+
+    dps = {dp.name: dp for dp in all_dps_list}
     if not dps:
         raise InvalidConfigError(
             'Gauge configured without any FAUCET configuration')
-    return dps
+    return faucet_config_files, faucet_conf_hashes, dps
 
 
 def _watcher_parser_v2(conf, logname, prom_client):
@@ -264,7 +287,8 @@ def _watcher_parser_v2(conf, logname, prom_client):
 
     if conf is None:
         conf = {}
-    dps = _parse_dps_for_watchers(conf, logname)
+    faucet_config_files, faucet_conf_hashes, dps = _parse_dps_for_watchers(
+        conf, logname)
     dbs = conf.pop('dbs')
 
     result = []
@@ -294,4 +318,15 @@ def _watcher_parser_v2(conf, logname, prom_client):
                 watcher.add_dp(dp)
                 result.append(watcher)
 
-    return result
+    return faucet_config_files, faucet_conf_hashes, result
+
+
+def get_config_for_api(valves):
+    """Return config as dict for all DPs."""
+    config = {i: {} for i in V2_TOP_CONFS}
+    for valve in valves.values():
+        valve_conf = valve.get_config_dict()
+        for i in V2_TOP_CONFS:
+            if i in valve_conf:
+                config[i].update(valve_conf[i])
+    return config

@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -69,7 +69,9 @@ class PromClient: # pylint: disable=too-few-public-methods
         if not self.server:
             app = make_wsgi_app(self._reg)
             if use_test_thread:
-                from wsgiref.simple_server import make_server, WSGIRequestHandler
+                # pylint: disable=import-outside-toplevel
+                from wsgiref.simple_server import (
+                    make_server, WSGIRequestHandler)
                 import threading
 
                 class NoLoggingWSGIRequestHandler(WSGIRequestHandler):

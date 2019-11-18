@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ from faucet.config_parser import get_config_for_api
 from faucet.valve_ryuapp import EventReconfigure, RyuAppBase
 from faucet.valve_util import dpid_log, kill_on_exception
 from faucet import faucet_experimental_api
-from faucet import faucet_experimental_event
+from faucet import faucet_event
 from faucet import faucet_bgp
 from faucet import faucet_dot1x
 from faucet import valves_manager
@@ -42,38 +42,36 @@ from faucet import faucet_metrics
 from faucet import valve_of
 
 
-class EventFaucetExperimentalAPIRegistered(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetExperimentalAPIRegistered(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to notify that the API is registered with Faucet."""
-    pass
 
 
-class EventFaucetMetricUpdate(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetMaintainStackRoot(event.EventBase):  # pylint: disable=too-few-public-methods
+    """Event used to maintain stack root."""
+
+
+class EventFaucetMetricUpdate(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger update of metrics."""
-    pass
 
 
-class EventFaucetResolveGateways(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetResolveGateways(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger gateway re/resolution."""
-    pass
 
 
-class EventFaucetStateExpire(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetStateExpire(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger expiration of state in controller."""
-    pass
 
-class EventFaucetFastStateExpire(event.EventBase): # pylint: disable=too-few-public-methods
+
+class EventFaucetFastStateExpire(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger fast expiration of state in controller."""
-    pass
 
 
-class EventFaucetAdvertise(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetAdvertise(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger periodic network advertisements (eg IPv6 RAs)."""
-    pass
 
 
-class EventFaucetFastAdvertise(event.EventBase): # pylint: disable=too-few-public-methods
+class EventFaucetFastAdvertise(event.EventBase):  # pylint: disable=too-few-public-methods
     """Event used to trigger periodic fast network advertisements (eg LACP)."""
-    pass
 
 
 
@@ -90,6 +88,7 @@ class Faucet(RyuAppBase):
     _EVENTS = [EventFaucetExperimentalAPIRegistered]
     _VALVE_SERVICES = {
         EventFaucetMetricUpdate: (None, 5),
+        EventFaucetMaintainStackRoot: (None, valves_manager.STACK_ROOT_STATE_UPDATE_TIME),
         EventFaucetResolveGateways: ('resolve_gateways', 2),
         EventFaucetStateExpire: ('state_expire', 5),
         EventFaucetFastStateExpire: ('fast_state_expire', 2),
@@ -110,12 +109,12 @@ class Faucet(RyuAppBase):
         self.bgp = faucet_bgp.FaucetBgp(
             self.logger, self.exc_logname, self.metrics, self._send_flow_msgs)
         self.dot1x = faucet_dot1x.FaucetDot1x(
-            self.logger, self.metrics, self._send_flow_msgs)
-        self.notifier = faucet_experimental_event.FaucetExperimentalEventNotifier(
+            self.logger, self.exc_logname, self.metrics, self._send_flow_msgs)
+        self.notifier = faucet_event.FaucetEventNotifier(
             self.get_setting('EVENT_SOCK'), self.metrics, self.logger)
         self.valves_manager = valves_manager.ValvesManager(
             self.logname, self.logger, self.metrics, self.notifier, self.bgp,
-            self.dot1x, self._send_flow_msgs)
+            self.dot1x, self.get_setting('CONFIG_AUTO_REVERT'), self._send_flow_msgs)
         self.thread_managers = (self.bgp, self.dot1x, self.metrics, self.notifier)
 
     @kill_on_exception(exc_logname)
@@ -205,6 +204,11 @@ class Faucet(RyuAppBase):
         """Handle a request to update metrics in the controller."""
         self.valves_manager.update_metrics(time.time())
 
+    @set_ev_cls(EventFaucetMaintainStackRoot, MAIN_DISPATCHER)
+    @kill_on_exception(exc_logname)
+    def _maintain_stack_root(self, _):
+        self.valves_manager.maintain_stack_root(time.time())
+
     @set_ev_cls(EventFaucetResolveGateways, MAIN_DISPATCHER)
     @set_ev_cls(EventFaucetStateExpire, MAIN_DISPATCHER)
     @set_ev_cls(EventFaucetFastStateExpire, MAIN_DISPATCHER)
@@ -216,16 +220,6 @@ class Faucet(RyuAppBase):
         self.valves_manager.valve_flow_services(
             time.time(),
             self._VALVE_SERVICES[type(ryu_event)][0])
-
-    def get_config(self):
-        """FAUCET experimental API: return config for all Valves."""
-        return get_config_for_api(self.valves_manager.valves)
-
-    def get_tables(self, dp_id):
-        """FAUCET experimental API: return config tables for one Valve."""
-        if dp_id in self.valves_manager.valves:
-            return self.valves_manager.valves[dp_id].dp.get_tables()
-        return {}
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER) # pylint: disable=no-member
     @kill_on_exception(exc_logname)
@@ -281,7 +275,9 @@ class Faucet(RyuAppBase):
             port.port_no for port in list(ryu_dp.ports.values())
             if (valve_of.port_status_from_state(port.state) and
                 not valve_of.ignore_port(port.port_no))}
-        self._send_flow_msgs(valve, valve.datapath_connect(now, discovered_up_ports))
+        self._send_flow_msgs(
+            valve, self.valves_manager.datapath_connect(now, valve, discovered_up_ports))
+        self.valves_manager.update_config_applied({valve.dp.dp_id: True})
 
     @kill_on_exception(exc_logname)
     def _datapath_disconnect(self, ryu_event):
@@ -334,3 +330,13 @@ class Faucet(RyuAppBase):
             return
         if msg.reason == ryu_dp.ofproto.OFPRR_IDLE_TIMEOUT:
             self._send_flow_msgs(valve, valve.flow_timeout(time.time(), msg.table_id, msg.match))
+
+    def get_config(self):
+        """FAUCET experimental API: return config for all Valves."""
+        return get_config_for_api(self.valves_manager.valves)
+
+    def get_tables(self, dp_id):
+        """FAUCET experimental API: return config tables for one Valve."""
+        if dp_id in self.valves_manager.valves:
+            return self.valves_manager.valves[dp_id].dp.get_tables()
+        return {}

@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from prometheus_client import Gauge as PromGauge
+from prometheus_client import Gauge as PromGauge, Info
 from prometheus_client import Counter, Histogram
 
 from faucet.prom_client import PromClient
@@ -35,12 +35,24 @@ class FaucetMetrics(PromClient):
         self.PORT_REQUIRED_LABELS = self.REQUIRED_LABELS + ['port', 'port_description']
         self._dpid_counters = {}
         self._dpid_gauges = {}
+        self.faucet_stack_root_dpid = self._gauge(
+            'faucet_stack_root_dpid',
+            'set to current stack root DPID', [])
         self.faucet_config_reload_requests = self._counter(
             'faucet_config_reload_requests',
             'number of config reload requests', [])
         self.faucet_config_load_error = self._gauge(
             'faucet_config_load_error',
             '1 if last attempt to re/load config failed', [])
+        self.faucet_config_hash = self._info(
+            'faucet_config_hash',
+            'file hashes for last successful config')
+        self.faucet_config_hash_func = self._gauge(
+            'faucet_config_hash_func',
+            'algorithm used to compute config hashes', ['algorithm'])
+        self.faucet_config_applied = self._gauge(
+            'faucet_config_applied',
+            'fraction of DPs that we have tried to apply config to', [])
         self.faucet_event_id = self._gauge(
             'faucet_event_id',
             'highest/most recent event ID to be sent', [])
@@ -55,7 +67,7 @@ class FaucetMetrics(PromClient):
             'number of OF packet_ins received but ignored from DP (due to rate limiting)')
         self.of_unexpected_packet_ins = self._dpid_counter(
             'of_unexpected_packet_ins',
-            'number of OF packet_ins received that are unexpected from DP (e.g. for VLAN that is not configured)')
+            'number of OF packet_ins received that are unexpected from DP (e.g. for unknown VLAN)')
         self.of_packet_ins = self._dpid_counter(
             'of_packet_ins',
             'number of OF packet_ins received from DP')
@@ -132,9 +144,9 @@ class FaucetMetrics(PromClient):
             'port_learn_bans',
             'number of times learning was banned on a port',
             self.PORT_REQUIRED_LABELS)
-        self.port_lacp_status = self._gauge(
-            'port_lacp_status',
-            'status of LACP on port',
+        self.port_lacp_state = self._gauge(
+            'port_lacp_state',
+            'state of LACP on a port',
             self.PORT_REQUIRED_LABELS)
         self.dp_status = self._dpid_gauge(
             'dp_status',
@@ -176,6 +188,9 @@ class FaucetMetrics(PromClient):
 
     def _gauge(self, var, var_help, labels):
         return PromGauge(var, var_help, labels, registry=self._reg) # pylint: disable=unexpected-keyword-arg
+
+    def _info(self, var, var_help):
+        return Info(var, var_help, registry=self._reg) # pylint: disable=unexpected-keyword-arg
 
     def _histogram(self, var, var_help, labels, buckets):
         return Histogram(var, var_help, labels, buckets=buckets, registry=self._reg) # pylint: disable=unexpected-keyword-arg

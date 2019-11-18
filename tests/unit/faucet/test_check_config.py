@@ -4,7 +4,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Innovation Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -251,43 +251,6 @@ dps:
                 native_vlan: 100
 """
         self.check_config_failure(unknown_hardware_config)
-
-    def test_routing_stacking(self):
-        """Test that routing and stacking cannot be enabled together."""
-        routing_stacking_config = """
-vlans:
-    100:
-        description: "100"
-        faucet_vips: ['1.2.3.4/24']
-dps:
-    switch1:
-        dp_id: 0xcafef00d
-        hardware: 'Open vSwitch'
-        stack:
-            priority: 1
-        interfaces:
-            1:
-                native_vlan: 100
-"""
-        self.check_config_failure(routing_stacking_config)
-
-    def test_stacking_noroot(self):
-        """Test that a stacking root is defined."""
-        stacking_config = """
-vlans:
-    100:
-        description: "100"
-dps:
-    switch1:
-        dp_id: 0xcafef00d
-        hardware: 'Open vSwitch'
-        stack:
-            priority: 0
-        interfaces:
-            1:
-                native_vlan: 100
-"""
-        self.check_config_failure(stacking_config)
 
     def test_bad_acl_action(self):
         """Test that an ACL with a bad match field is rejected."""

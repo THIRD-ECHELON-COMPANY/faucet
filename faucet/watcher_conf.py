@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,8 +53,9 @@ The following elements can be configured for each db, at the level of
 
 The following config elements then depend on the type.
 For text:
-
  * file (string): the filename of the file to write output to.
+ * path (string): path where files should be written when writing to \
+       muiltiple files
  * compress (bool): compress (with gzip) flow_table output while writing it
 
 For influx:
@@ -80,6 +81,7 @@ For Prometheus:
     db_defaults = {
         'type': None,
         'file': None,
+        'path': None,
         'compress': False,
         # compress flow table file
         'influx_db': 'faucet',
@@ -104,6 +106,7 @@ For Prometheus:
     db_defaults_types = {
         'type': str,
         'file': str,
+        'path': str,
         'compress': bool,
         'influx_db': str,
         'influx_host': str,
@@ -150,6 +153,7 @@ For Prometheus:
         self.dps = None
         self.compress = None
         self.file = None
+        self.path = None
         self.influx_db = None
         self.influx_host = None
         self.influx_port = None
@@ -178,6 +182,9 @@ For Prometheus:
             self.file is not None and not
             (os.path.dirname(self.file) and os.access(os.path.dirname(self.file), os.W_OK)),
             '%s is not writable' % self.file)
+        test_config_condition(
+            self.path is not None and not os.access(self.path, os.W_OK),
+            '%s is not writable' % self.file)
 
     def add_dp(self, dp): # pylint: disable=invalid-name
         """Add a datapath to this watcher."""
@@ -188,3 +195,9 @@ For Prometheus:
         test_config_condition(
             self.all_dps and self.dps is not None,
             'all_dps and dps cannot be set together')
+        test_config_condition(
+            not self.type, 'type must be set')
+        valid_types = {'flow_table', 'port_stats', 'port_state', 'meter_stats'}
+        test_config_condition(
+            self.type not in valid_types,
+            'type %s not one of %s' % (self.type, valid_types))

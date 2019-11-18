@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,8 +18,6 @@
 
 from faucet.faucet_metadata import EGRESS_METADATA_MASK
 
-STACK_LOOP_PROTECT_FIELD = 'vlan_pcp'
-
 
 class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instance-attributes
     """Configuration for a single table."""
@@ -27,8 +25,8 @@ class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instan
     def __init__(self, name, table_id, # pylint: disable=too-many-arguments
                  exact_match=None, meter=None, output=True, miss_goto=None,
                  size=None, match_types=None, set_fields=None, dec_ttl=None,
-                 vlan_port_scale=None, next_tables=None, metadata_match=0,
-                 metadata_write=0):
+                 vlan_scale=None, vlan_port_scale=None,
+                 next_tables=None, metadata_match=0, metadata_write=0):
         self.name = name
         self.table_id = table_id
         self.exact_match = exact_match
@@ -39,6 +37,7 @@ class ValveTableConfig: # pylint: disable=too-few-public-methods,too-many-instan
         self.match_types = match_types
         self.set_fields = set_fields
         self.dec_ttl = dec_ttl
+        self.vlan_scale = vlan_scale
         self.vlan_port_scale = vlan_port_scale
         self.metadata_match = metadata_match
         self.metadata_write = metadata_write
@@ -96,7 +95,15 @@ VLAN_DEFAULT_CONFIG = ValveTableConfig(
                  ('in_port', False), ('vlan_vid', False)),
     set_fields=('vlan_vid',),
     vlan_port_scale=1.5,
-    next_tables=('vlan_acl', 'classification', 'eth_src')
+    next_tables=('copro', 'vlan_acl', 'classification', 'eth_src')
+    )
+COPRO_DEFAULT_CONFIG = ValveTableConfig(
+    'copro',
+    VLAN_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('in_port', False), ('eth_type', False), ('vlan_vid', False)),
+    vlan_port_scale=1.5,
+    miss_goto='eth_dst',
+    next_tables=(('eth_dst',)),
     )
 VLAN_ACL_DEFAULT_CONFIG = ValveTableConfig(
     'vlan_acl',
@@ -126,6 +133,7 @@ VIP_DEFAULT_CONFIG = ValveTableConfig(
     match_types=(('arp_tpa', False), ('eth_dst', False), ('eth_type', False),
                  ('icmpv6_type', False), ('ip_proto', False)),
     next_tables=_NEXT_ETH,
+    vlan_scale=8,
     )
 ETH_DST_HAIRPIN_DEFAULT_CONFIG = ValveTableConfig(
     'eth_dst_hairpin',
@@ -139,26 +147,33 @@ ETH_DST_DEFAULT_CONFIG = ValveTableConfig(
     'eth_dst',
     ETH_DST_HAIRPIN_DEFAULT_CONFIG.table_id + 1,
     exact_match=True,
-    miss_goto='flood',
+    miss_goto='flood', # Note: when using egress acls the miss goto will be
+                       # egress acl table
     match_types=(('eth_dst', False), ('vlan_vid', False)),
-    next_tables=('egress',),
+    next_tables=('egress', 'egress_acl'),
     vlan_port_scale=4.1,
     metadata_write=EGRESS_METADATA_MASK
     )
-FLOOD_DEFAULT_CONFIG = ValveTableConfig(
-    'flood',
+EGRESS_ACL_DEFAULT_CONFIG = ValveTableConfig(
+    'egress_acl',
     ETH_DST_DEFAULT_CONFIG.table_id + 1,
-    match_types=(('eth_dst', True), ('in_port', False), ('vlan_vid', False)),
-    vlan_port_scale=2.1,
+    next_tables=('egress',)
     )
 EGRESS_DEFAULT_CONFIG = ValveTableConfig(
     'egress',
-    FLOOD_DEFAULT_CONFIG.table_id + 1,
+    EGRESS_ACL_DEFAULT_CONFIG.table_id + 1,
     match_types=(('metadata', True), ('vlan_vid', False)),
     vlan_port_scale=1.5,
+    next_tables=('flood',),
+    miss_goto='flood',
     metadata_match=EGRESS_METADATA_MASK
     )
-
+FLOOD_DEFAULT_CONFIG = ValveTableConfig(
+    'flood',
+    EGRESS_DEFAULT_CONFIG.table_id + 1,
+    match_types=(('eth_dst', True), ('in_port', False), ('vlan_vid', False)),
+    vlan_scale=16,
+    )
 MINIMUM_FAUCET_PIPELINE_TABLES = {
     'vlan', 'eth_src', 'eth_dst', 'flood'}
 
@@ -168,6 +183,7 @@ MINIMUM_FAUCET_PIPELINE_TABLES = {
 FAUCET_PIPELINE = (
     PORT_ACL_DEFAULT_CONFIG,
     VLAN_DEFAULT_CONFIG,
+    COPRO_DEFAULT_CONFIG,
     VLAN_ACL_DEFAULT_CONFIG,
     CLASSIFICATION_DEFAULT_CONFIG,
     ETH_SRC_DEFAULT_CONFIG,
@@ -176,13 +192,15 @@ FAUCET_PIPELINE = (
     VIP_DEFAULT_CONFIG,
     ETH_DST_HAIRPIN_DEFAULT_CONFIG,
     ETH_DST_DEFAULT_CONFIG,
+    EGRESS_ACL_DEFAULT_CONFIG,
+    EGRESS_DEFAULT_CONFIG,
     FLOOD_DEFAULT_CONFIG,
-    EGRESS_DEFAULT_CONFIG
 )
 
 DEFAULT_CONFIGS = {
     'port_acl': PORT_ACL_DEFAULT_CONFIG,
     'vlan': VLAN_DEFAULT_CONFIG,
+    'copro': COPRO_DEFAULT_CONFIG,
     'vlan_acl': VLAN_ACL_DEFAULT_CONFIG,
     'eth_src': ETH_SRC_DEFAULT_CONFIG,
     'ipv4_fib': IPV4_FIB_DEFAULT_CONFIG,
@@ -190,6 +208,7 @@ DEFAULT_CONFIGS = {
     'vip': VIP_DEFAULT_CONFIG,
     'eth_dst_hairpin': ETH_DST_HAIRPIN_DEFAULT_CONFIG,
     'eth_dst': ETH_DST_DEFAULT_CONFIG,
-    'flood': FLOOD_DEFAULT_CONFIG,
+    'egress_acl': EGRESS_ACL_DEFAULT_CONFIG,
     'egress': EGRESS_DEFAULT_CONFIG,
+    'flood': FLOOD_DEFAULT_CONFIG,
 }

@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,12 +35,10 @@ from faucet.valve_util import dpid_log, get_logger, get_setting
 
 class ValveDeadThreadException(Exception):
     """Exception raised when a dead thread is detected."""
-    pass
 
 
 class EventReconfigure(event.EventBase):
     """Event sent to controller to cause config reload."""
-    pass
 
 
 class RyuAppBase(app_manager.RyuApp):
@@ -71,27 +69,29 @@ class RyuAppBase(app_manager.RyuApp):
 
     def _get_threads(self):
         """Return started threads."""
-        threads = self.threads
-        for thread_manager in self.thread_managers:
-            if thread_manager and thread_manager.thread is not None:
-                threads.append(thread_manager.thread)
+        threads = self.threads.copy()
+        threads.extend(
+            [thread_manager.thread for thread_manager in self.thread_managers
+             if thread_manager and thread_manager.thread is not None])
         return threads
 
     def _check_thread_exception(self):
         """Check for a dead thread and cause/log an exception."""
-        for thread in self._get_threads():
-            if thread.dead:
+        dead_threads = [thread for thread in self._get_threads() if thread.dead]
+        if dead_threads:
+            for thread in dead_threads:
                 thread_name = getattr(thread, 'name', 'unknown')
                 # Inconveniently, eventlet and friends helpfully put the last
                 # exception on stderr but not anywhere else where we can log it.
-                self.logger.error('unexpected %s thread termination - check Ryu/process stderr log' % thread_name)
-                # If that succeeds (was a temporary error that killed the thread),
-                # then raise an exception to make sure we know a thread died.
-                raise ValveDeadThreadException
+                self.logger.error(
+                    'unexpected %s thread termination - check Ryu/process stderr log' % thread_name)
+            # If that succeeds (was a temporary error that killed the thread),
+            # then raise an exception to make sure we know a thread died.
+            raise ValveDeadThreadException
 
     def _thread_jitter(self, period, jitter=2):
         """Reschedule another thread with a random jitter and check for dead threads."""
-        hub.sleep(period + random.randint(0, jitter))
+        hub.sleep(period + (random.random() * jitter))
         # At least one thread needs to run to be able to detect that any of the others has died.
         self._check_thread_exception()
 

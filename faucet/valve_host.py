@@ -3,7 +3,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import random
-
 from faucet import valve_of
 from faucet.valve_manager_base import ValveManagerBase
 
@@ -28,7 +26,8 @@ class ValveHostManager(ValveManagerBase):
 
     def __init__(self, logger, ports, vlans, eth_src_table, eth_dst_table,
                  eth_dst_hairpin_table, pipeline, learn_timeout, learn_jitter,
-                 learn_ban_timeout, cache_update_guard_time, idle_dst, stack):
+                 learn_ban_timeout, cache_update_guard_time, idle_dst, stack,
+                 has_externals, stack_root_flood_reflection):
         self.logger = logger
         self.ports = ports
         self.vlans = vlans
@@ -41,10 +40,13 @@ class ValveHostManager(ValveManagerBase):
         self.learn_ban_timeout = learn_ban_timeout
         self.low_priority = self._LOW_PRIORITY
         self.host_priority = self._MATCH_PRIORITY
+        self.high_priority = self._HIGH_PRIORITY
         self.cache_update_guard_time = cache_update_guard_time
         self.output_table = self.eth_dst_table
         self.idle_dst = idle_dst
         self.stack = stack
+        self.has_externals = has_externals
+        self.stack_root_flood_reflection = stack_root_flood_reflection
         if self.eth_dst_hairpin_table:
             self.output_table = self.eth_dst_hairpin_table
 
@@ -87,31 +89,28 @@ class ValveHostManager(ValveManagerBase):
         return ofmsgs
 
     def add_port(self, port):
-        """initialise override_output_port if necessary"""
         ofmsgs = []
-        if port.override_output_port:
+        if port.coprocessor:
             ofmsgs.append(self.eth_src_table.flowmod(
-                match=self.eth_src_table.match(
-                    in_port=port.number),
-                priority=self.low_priority + 1,
-                inst=[valve_of.apply_actions([
-                    valve_of.output_controller(),
-                    valve_of.output_port(port.override_output_port.number)])]))
+                match=self.eth_src_table.match(in_port=port.number),
+                priority=self.high_priority,
+                inst=[self.eth_src_table.goto(self.output_table)]))
         return ofmsgs
 
     def del_port(self, port):
         ofmsgs = []
-        if port.permanent_learn:
-            for entry in port.hosts():
-                ofmsgs.extend(self.pipeline.remove_filter(
-                    {'eth_src': entry.eth_src}))
-        for vlan in port.vlans():
+        ofmsgs.append(
+            self.eth_src_table.flowdel(self.eth_src_table.match(in_port=port.number)))
+        for table in (self.eth_dst_table, self.eth_dst_hairpin_table):
+            if table:
+                # per OF 1.3.5 B.6.23, the OFA will match flows
+                # that have an action targeting this port.
+                ofmsgs.append(table.flowdel(out_port=port.number))
+        vlans = port.vlans()
+        if port.stack:
+            vlans = self.vlans.values()
+        for vlan in vlans:
             vlan.clear_cache_hosts_on_port(port)
-            for table in (self.eth_dst_table, self.eth_dst_hairpin_table):
-                if table:
-                    # per OF 1.3.5 B.6.23, the OFA will match flows
-                    # that have an action targeting this port.
-                    ofmsgs.append(table.flowdel(table.match(vlan=vlan), out_port=port.number))
         return ofmsgs
 
     def initialise_tables(self):
@@ -148,22 +147,22 @@ class ValveHostManager(ValveManagerBase):
                     vlan.hosts_count(), vlan.vid, expired_hosts))
         return expired_hosts
 
-    def _jitter_learn_timeout(self):
+    def _jitter_learn_timeout(self, base_learn_timeout, port, eth_dst):
         """Calculate jittered learning timeout to avoid synchronized host timeouts."""
-        return int(max(abs(
-            self.learn_timeout -
-            (self.learn_jitter / 2) + random.randint(0, self.learn_jitter)),
-                       self.cache_update_guard_time))
-
-    def learn_host_timeouts(self, port):
-        """Calculate flow timeouts for learning on a port."""
-        # hosts learned on this port never relearned
+        # Hosts on this port never timeout.
         if port.permanent_learn:
-            learn_timeout = 0
-        else:
-            learn_timeout = self.learn_timeout
-            if self.learn_timeout:
-                learn_timeout = self._jitter_learn_timeout()
+            return 0
+        if not base_learn_timeout:
+            return 0
+        # Jitter learn timeout based on eth address, so timeout processing is jittered,
+        # the same hosts will timeout approximately the same time on a stack.
+        jitter = hash(eth_dst) % self.learn_jitter
+        min_learn_timeout = base_learn_timeout - self.learn_jitter
+        return int(max(abs(min_learn_timeout + jitter), self.cache_update_guard_time))
+
+    def learn_host_timeouts(self, port, eth_src):
+        """Calculate flow timeouts for learning on a port."""
+        learn_timeout = self._jitter_learn_timeout(self.learn_timeout, port, eth_src)
 
         # Update datapath to no longer send packets from this mac to controller
         # note the use of hard_timeout here and idle_timeout for the dst table
@@ -181,6 +180,30 @@ class ValveHostManager(ValveManagerBase):
             dst_rule_idle_timeout = 0
         return (src_rule_idle_timeout, src_rule_hard_timeout, dst_rule_idle_timeout)
 
+    def learn_host_intervlan_routing_flows(self, port, vlan, eth_src, eth_dst):
+        """Returns flows for the eth_src_table that enable packets that have been
+           routed to be accepted from an adjacent DP and then switched to the destination.
+           Eth_src_table flow rule to match on port, eth_src, eth_dst and vlan
+
+        Args:
+            port (Port): Port to match on.
+            vlan (VLAN): VLAN to match on
+            eth_src: source MAC address (should be the router MAC)
+            eth_dst: destination MAC address
+        """
+        ofmsgs = []
+        (src_rule_idle_timeout, src_rule_hard_timeout, _) = self.learn_host_timeouts(port, eth_src)
+        src_match = self.eth_src_table.match(vlan=vlan, eth_src=eth_src, eth_dst=eth_dst)
+        src_priority = self.host_priority - 1
+        inst = [self.eth_src_table.goto(self.output_table)]
+        ofmsgs.extend([self.eth_src_table.flowmod(
+            match=src_match,
+            priority=src_priority,
+            inst=inst,
+            hard_timeout=src_rule_hard_timeout,
+            idle_timeout=src_rule_idle_timeout)])
+        return ofmsgs
+
     def learn_host_on_vlan_port_flows(self, port, vlan, eth_src,
                                       delete_existing, refresh_rules,
                                       src_rule_idle_timeout,
@@ -197,35 +220,52 @@ class ValveHostManager(ValveManagerBase):
         src_match = self.eth_src_table.match(
             in_port=port.number, vlan=vlan, eth_src=eth_src)
         src_priority = self.host_priority - 1
-        inst = self.eth_src_table.goto(self.output_table)
 
-        if port.override_output_port:
-            inst = valve_of.apply_actions([
-                valve_of.output_port(port.override_output_port.number)])
+        inst = []
 
-        loop_protect_field = None
-        if port.tagged_vlans and port.loop_protect_external and self.stack:
-            loop_protect_field = 0
+        inst.append(self.eth_src_table.goto(self.output_table))
 
         ofmsgs.append(self.eth_src_table.flowmod(
             match=src_match,
             priority=src_priority,
-            inst=[inst],
+            inst=inst,
             hard_timeout=src_rule_hard_timeout,
             idle_timeout=src_rule_idle_timeout))
 
         hairpinning = port.hairpin or port.hairpin_unicast
-
         # If we are refreshing only and not in hairpin mode, leave existing eth_dst alone.
         if refresh_rules and not hairpinning:
             return ofmsgs
 
+        external_forwarding_requested = None
+        match_dict = {
+            'vlan': vlan, 'eth_dst': eth_src, valve_of.EXTERNAL_FORWARDING_FIELD: None}
+        if self.has_externals:
+            match_dict.update({
+                valve_of.EXTERNAL_FORWARDING_FIELD: valve_of.PCP_EXT_PORT_FLAG})
+            if port.tagged_vlans and port.loop_protect_external and self.stack:
+                external_forwarding_requested = False
+            elif not port.stack:
+                external_forwarding_requested = True
+
+        inst = self.pipeline.output(
+            port, vlan, external_forwarding_requested=external_forwarding_requested)
+
         # Output packets for this MAC to specified port.
         ofmsgs.append(self.eth_dst_table.flowmod(
-            self.eth_dst_table.match(vlan=vlan, eth_dst=eth_src),
+            self.eth_dst_table.match(**match_dict),
             priority=self.host_priority,
-            inst=self.pipeline.output(port, vlan, loop_protect_field=loop_protect_field),
+            inst=inst,
             idle_timeout=dst_rule_idle_timeout))
+
+        if self.has_externals and not port.loop_protect_external:
+            match_dict.update({
+                valve_of.EXTERNAL_FORWARDING_FIELD: valve_of.PCP_NONEXT_PORT_FLAG})
+            ofmsgs.append(self.eth_dst_table.flowmod(
+                self.eth_dst_table.match(**match_dict),
+                priority=self.host_priority,
+                inst=inst,
+                idle_timeout=dst_rule_idle_timeout))
 
         # If port is in hairpin mode, install a special rule
         # that outputs packets destined to this MAC back out the same
@@ -266,16 +306,27 @@ class ValveHostManager(ValveManagerBase):
             cache_age = now - entry.cache_time
             cache_port = entry.port
 
-        same_lag = (
-            cache_port is not None and
-            cache_port.lacp and port.lacp and cache_port.lacp == port.lacp)
-        if cache_port == port or same_lag:
-            # if we very very recently learned this host, don't do anything.
-            if cache_age < self.cache_update_guard_time:
-                return (ofmsgs, cache_port, False)
-            # skip delete if host didn't change ports or on same LAG.
-            delete_existing = False
-            refresh_rules = True
+        if cache_port is not None:
+            # packet was received on same member of a LAG.
+            same_lag = (port.lacp and port.lacp == cache_port.lacp)
+            # stacks of size > 2 will have an unknown MAC flooded towards the root,
+            # and flooded down again. If we learned the MAC on a local port and
+            # heard the reflected flooded copy, discard the reflection.
+            local_stack_learn = (
+                self.stack_root_flood_reflection and port.stack and not cache_port.stack)
+            guard_time = self.cache_update_guard_time
+            if cache_port == port or same_lag or local_stack_learn:
+                # aggressively re-learn on LAGs, and prefer recently learned
+                # locally learned hosts on a stack.
+                if same_lag or local_stack_learn:
+                    guard_time = 2
+                # recent cache update, don't do anything.
+                if cache_age < guard_time:
+                    return (ofmsgs, cache_port, False)
+                # skip delete if host didn't change ports or on same LAG.
+                if cache_port == port or same_lag:
+                    delete_existing = False
+                    refresh_rules = True
 
         if port.loop_protect:
             ban_age = None
@@ -305,7 +356,7 @@ class ValveHostManager(ValveManagerBase):
 
         (src_rule_idle_timeout,
          src_rule_hard_timeout,
-         dst_rule_idle_timeout) = self.learn_host_timeouts(port)
+         dst_rule_idle_timeout) = self.learn_host_timeouts(port, eth_src)
 
         ofmsgs.extend(self.learn_host_on_vlan_port_flows(
             port, vlan, eth_src, delete_existing, refresh_rules,
@@ -352,13 +403,9 @@ class ValveHostFlowRemovedManager(ValveHostManager):
     def expire_hosts_from_vlan(self, _vlan, _now):
         return []
 
-    def learn_host_timeouts(self, port):
+    def learn_host_timeouts(self, port, eth_src):
         """Calculate flow timeouts for learning on a port."""
-        # hosts learned on this port never relearned
-        if port.permanent_learn:
-            learn_timeout = 0
-        else:
-            learn_timeout = self._jitter_learn_timeout()
+        learn_timeout = self._jitter_learn_timeout(self.learn_timeout, port, eth_src)
 
         # Disable hard_time, dst rule expires after src rule.
         src_rule_idle_timeout = learn_timeout

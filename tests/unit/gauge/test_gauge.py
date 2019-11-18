@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import yaml
 
 import requests
-from requests.exceptions import ConnectionError, ReadTimeout
+from requests.exceptions import ReadTimeout
 
 from ryu.controller.ofp_event import EventOFPMsgBase
 from ryu.lib import type_desc
@@ -26,7 +26,7 @@ from ryu.ofproto import ofproto_v1_3_parser as parser
 
 from prometheus_client import CollectorRegistry
 
-from faucet import gauge, gauge_prom, gauge_influx, gauge_pollers, watcher
+from faucet import gauge, gauge_prom, gauge_influx, gauge_pollers, watcher, valve_util
 
 
 class QuietHandler(BaseHTTPRequestHandler):
@@ -285,7 +285,7 @@ class GaugePrometheusTests(unittest.TestCase): # pytype: disable=module-attr
 
         prom_poller = gauge_prom.GaugePortStatsPrometheusPoller(conf, '__name__', self.prom_client)
         msg = port_stats_msg(datapath)
-        prom_poller.update(time.time(), datapath.dp_id, msg)
+        prom_poller.update(time.time(), msg)
 
         prom_lines = self.get_prometheus_stats(conf.prometheus_addr, conf.prometheus_port)
         prom_lines = self.parse_prom_output(prom_lines)
@@ -321,7 +321,7 @@ class GaugePrometheusTests(unittest.TestCase): # pytype: disable=module-attr
             msg = port_state_msg(conf.dp, i, reasons[i-1])
             port_name = conf.dp.ports[i].name
             rcv_time = int(time.time())
-            prom_poller.update(rcv_time, conf.dp.dp_id, msg)
+            prom_poller.update(rcv_time, msg)
 
             prom_lines = self.get_prometheus_stats(conf.prometheus_addr, conf.prometheus_port)
             prom_lines = self.parse_prom_output(prom_lines)
@@ -353,7 +353,7 @@ class GaugePrometheusTests(unittest.TestCase): # pytype: disable=module-attr
         rcv_time = int(time.time())
         instructions = [parser.OFPInstructionGotoTable(1)]
         msg = flow_stats_msg(conf.dp, instructions)
-        prom_poller.update(rcv_time, conf.dp.dp_id, msg)
+        prom_poller.update(rcv_time, msg)
 
 
 class GaugeInfluxShipperTest(unittest.TestCase): # pytype: disable=module-attr
@@ -525,19 +525,19 @@ class GaugeInfluxUpdateTest(unittest.TestCase): # pytype: disable=module-attr
 
         return (tags[0], influx_data)
 
-
     def test_port_state(self):
         """ Check the update method of the GaugePortStateInfluxDBLogger class"""
 
         conf = self.create_config_obj(create_mock_datapath(3))
         db_logger = gauge_influx.GaugePortStateInfluxDBLogger(conf, '__name__', mock.Mock())
+        db_logger._running = True
 
         reasons = [ofproto.OFPPR_ADD, ofproto.OFPPR_DELETE, ofproto.OFPPR_MODIFY]
         for i in range(1, len(conf.dp.ports) + 1):
 
             msg = port_state_msg(conf.dp, i, reasons[i-1])
             rcv_time = int(time.time())
-            db_logger.update(rcv_time, conf.dp.dp_id, msg)
+            db_logger.update(rcv_time, msg)
 
             with open(self.server.output_file, 'r') as log:
                 output = log.read()
@@ -550,11 +550,12 @@ class GaugeInfluxUpdateTest(unittest.TestCase): # pytype: disable=module-attr
         """Check the update method of the GaugePortStatsInfluxDBLogger class"""
         conf = self.create_config_obj(create_mock_datapath(2))
         db_logger = gauge_influx.GaugePortStatsInfluxDBLogger(conf, '__name__', mock.Mock())
+        db_logger._running = True
 
         msg = port_stats_msg(conf.dp)
         rcv_time = int(time.time())
 
-        db_logger.update(rcv_time, conf.dp.dp_id, msg)
+        db_logger.update(rcv_time, msg)
         with open(self.server.output_file, 'r') as log:
             output = log.readlines()
 
@@ -576,11 +577,12 @@ class GaugeInfluxUpdateTest(unittest.TestCase): # pytype: disable=module-attr
 
         conf = self.create_config_obj(create_mock_datapath(0))
         db_logger = gauge_influx.GaugeFlowTableInfluxDBLogger(conf, '__name__', mock.Mock())
+        db_logger._running = True
 
         rcv_time = int(time.time())
         instructions = [parser.OFPInstructionGotoTable(1)]
         msg = flow_stats_msg(conf.dp, instructions)
-        db_logger.update(rcv_time, conf.dp.dp_id, msg)
+        db_logger.update(rcv_time, msg)
 
         other_fields = {'dp_name': conf.dp.name,
                         'dp_id': hex(conf.dp.dp_id),
@@ -635,7 +637,7 @@ class GaugeThreadPollerTest(unittest.TestCase): # pytype: disable=module-attr
     def fake_no_response(self):
         """This should be called instead of the no_response method in the
         GaugeThreadPoller class, which just throws an error"""
-        pass
+        return
 
     def test_start(self):
         """ Checks if the poller is started """
@@ -699,6 +701,7 @@ class GaugePollerTest(unittest.TestCase): # pytype: disable=module-attr
         except Exception as err:
             self.fail("Code threw an exception: {}".format(err))
 
+
 class GaugePortStatsPollerTest(GaugePollerTest):
     """Checks the GaugePortStatsPoller class"""
 
@@ -712,6 +715,7 @@ class GaugePortStatsPollerTest(GaugePollerTest):
         """Check that the poller doesnt throw an exception"""
         poller = gauge_pollers.GaugePortStatsPoller(mock.Mock(), '__name__', mock.Mock())
         self.check_no_response(poller)
+
 
 class GaugeFlowTablePollerTest(GaugePollerTest):
     """Checks the GaugeFlowTablePoller class"""
@@ -732,22 +736,26 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
     """Checks the loggers in watcher.py."""
 
     conf = None
-    temp_fd = None
     temp_path = None
+    tmp_filename = "tmp_filename"
 
     def setUp(self):
-        """Creates a temporary file and a mocked conf object"""
-        self.temp_fd, self.temp_path = tempfile.mkstemp()
-        self.conf = mock.Mock(file=self.temp_path, compress=False)
+        """Creates a temporary file and directory and a mocked conf object"""
+        self.temp_path = tempfile.mkdtemp()
+        self.conf = mock.Mock(
+            file=os.path.join(self.temp_path, self.tmp_filename),
+            path=self.temp_path,
+            compress=False
+            )
 
     def tearDown(self):
-        """Closes and deletes the temporary file"""
-        os.close(self.temp_fd)
-        os.remove(self.temp_path)
+        """Removes the temporary directory and its contents"""
+        shutil.rmtree(self.temp_path)
 
-    def get_file_contents(self):
+    def get_file_contents(self, filename=tmp_filename):
         """Return the contents of the temporary file and clear it"""
-        with open(self.temp_path, 'r+') as file_:
+        filename = os.path.join(self.temp_path, filename)
+        with open(filename, 'r+') as file_:
             contents = file_.read()
             file_.seek(0, 0)
             file_.truncate()
@@ -756,7 +764,6 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
     def test_port_state(self):
         """Check the update method in the GaugePortStateLogger class"""
 
-        logger = watcher.GaugePortStateLogger(self.conf, '__name__', mock.Mock())
         reasons = {'unknown' : 5,
                    'add' : ofproto.OFPPR_ADD,
                    'delete' : ofproto.OFPPR_DELETE,
@@ -768,6 +775,9 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
         datapath = create_mock_datapath(1)
         ofp_attr = {'ofproto': ofproto}
         datapath.configure_mock(**ofp_attr)
+        self.conf.dp = datapath
+        logger = watcher.GaugePortStateLogger(self.conf, '__name__', mock.Mock())
+        logger._running = True
 
         for reason in reasons:
             state = 0
@@ -775,7 +785,7 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
                 state = ofproto.OFPPS_LINK_DOWN
 
             msg = port_state_msg(datapath, 1, reasons[reason], state)
-            logger.update(time.time(), datapath.dp_id, msg)
+            logger.update(time.time(), msg)
 
             log_str = self.get_file_contents().lower()
             self.assertTrue(reason in log_str)
@@ -798,13 +808,14 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
         self.conf.configure_mock(**dp_attr)
 
         logger = watcher.GaugePortStatsLogger(self.conf, '__name__', mock.Mock())
+        logger._running = True
         msg = port_stats_msg(datapath)
 
         original_stats = []
         for i in range(0, len(msg.body)):
             original_stats.append(logger_to_ofp(msg.body[i]))
 
-        logger.update(time.time(), datapath.dp_id, msg)
+        logger.update(time.time(), msg)
 
         log_str = self.get_file_contents()
         for stat_name in original_stats[0]:
@@ -839,22 +850,35 @@ class GaugeWatcherTest(unittest.TestCase): # pytype: disable=module-attr
         self.conf.configure_mock(**dp_attr)
 
         logger = watcher.GaugeFlowTableLogger(self.conf, '__name__', mock.Mock())
+        logger._running = True
         instructions = [parser.OFPInstructionGotoTable(1)]
 
         msg = flow_stats_msg(datapath, instructions)
-        logger.update(time.time(), datapath.dp_id, msg)
-        log_str = self.get_file_contents()
+        rcv_time = time.time()
+        rcv_time_str = logger._rcv_time(rcv_time)
+        logger.update(rcv_time, msg)
+        log_str = self.get_file_contents(
+            "{}--flowtable--{}.json".format(datapath.name, rcv_time_str)
+            )
 
-        yaml_dict = yaml.safe_load(log_str)['msg']['OFPFlowStatsReply']['body'][0]['OFPFlowStats']
+        yaml_dict = yaml.safe_load(log_str)['OFPFlowStatsReply']['body'][0]['OFPFlowStats']
 
         compare_flow_msg(msg, yaml_dict, self)
 
 
 class RyuAppSmokeTest(unittest.TestCase): # pytype: disable=module-attr
+    """Test Gauge Ryu app."""
 
     def setUp(self):
-        os.environ['GAUGE_LOG'] = '/dev/null'
-        os.environ['GAUGE_EXCEPTION_LOG'] = '/dev/null'
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ['GAUGE_LOG'] = os.path.join(self.tmpdir, 'gauge.log')
+        os.environ['GAUGE_EXCEPTION_LOG'] = os.path.join(self.tmpdir, 'gauge-exception.log')
+        self.ryu_app = None
+
+    def tearDown(self):
+        valve_util.close_logger(self.ryu_app.logger)
+        valve_util.close_logger(self.ryu_app.exc_logger)
+        shutil.rmtree(self.tmpdir)
 
     @staticmethod
     def _fake_dp():
@@ -868,29 +892,28 @@ class RyuAppSmokeTest(unittest.TestCase): # pytype: disable=module-attr
         event.dp = msg.datapath
         return event
 
+    def _write_config(self, config_file_name, config):
+        with open(config_file_name, 'w') as config_file:
+            config_file.write(config)
+
     def test_gauge(self):
         """Test Gauge can be initialized."""
         os.environ['GAUGE_CONFIG'] = '/dev/null'
-        ryu_app = gauge.Gauge(
+        self.ryu_app = gauge.Gauge(
             dpset={},
             reg=CollectorRegistry())
-        ryu_app.reload_config(None)
-        self.assertFalse(ryu_app._config_files_changed())
-        ryu_app._update_watcher(None, self._fake_event())
-        ryu_app._start_watchers(self._fake_dp(), {}, time.time())
+        self.ryu_app.reload_config(None)
+        self.assertFalse(self.ryu_app._config_files_changed())
+        self.ryu_app._update_watcher(None, self._fake_event())
+        self.ryu_app._start_watchers(self._fake_dp(), {}, time.time())
         for event_handler in (
-                ryu_app._datapath_connect,
-                ryu_app._datapath_disconnect):
+                self.ryu_app._datapath_connect,
+                self.ryu_app._datapath_disconnect):
             event_handler(self._fake_event())
 
     def test_gauge_config(self):
         """Test Gauge minimal config."""
-        tmpdir = tempfile.mkdtemp()
-        os.environ['FAUCET_CONFIG'] = os.path.join(tmpdir, 'faucet.yaml')
-        os.environ['GAUGE_CONFIG'] = os.path.join(tmpdir, 'gauge.yaml')
-        with open(os.environ['FAUCET_CONFIG'], 'w') as faucet_config:
-            faucet_config.write(
-                """
+        faucet_conf1 = """
 vlans:
    100:
        description: "100"
@@ -901,11 +924,23 @@ dps:
            1:
                description: "1"
                native_vlan: 100
-""")
-        os.environ['GAUGE_CONFIG'] = os.path.join(tmpdir, 'gauge.yaml')
-        with open(os.environ['GAUGE_CONFIG'], 'w') as gauge_config:
-            gauge_config.write(
-                """
+"""
+        faucet_conf2 = """
+vlans:
+   100:
+       description: "200"
+dps:
+   dp1:
+       dp_id: 0x1
+       interfaces:
+           2:
+               description: "2"
+               native_vlan: 100
+"""
+        os.environ['FAUCET_CONFIG'] = os.path.join(self.tmpdir, 'faucet.yaml')
+        self._write_config(os.environ['FAUCET_CONFIG'], faucet_conf1)
+        os.environ['GAUGE_CONFIG'] = os.path.join(self.tmpdir, 'gauge.yaml')
+        gauge_conf = """
 faucet_configs:
    - '%s'
 watchers:
@@ -928,15 +963,36 @@ dbs:
         type: 'prometheus'
         prometheus_addr: '0.0.0.0'
         prometheus_port: 0
-""" % os.environ['FAUCET_CONFIG'])
-        ryu_app = gauge.Gauge(
+""" % os.environ['FAUCET_CONFIG']
+        self._write_config(os.environ['GAUGE_CONFIG'], gauge_conf)
+        self.ryu_app = gauge.Gauge(
             dpset={},
             reg=CollectorRegistry())
-        ryu_app.reload_config(None)
-        self.assertTrue(ryu_app.watchers)
-        ryu_app.reload_config(None)
-        self.assertTrue(ryu_app.watchers)
-        shutil.rmtree(tmpdir)
+        self.ryu_app.reload_config(None)
+        self.assertFalse(self.ryu_app._config_files_changed())
+        self.assertTrue(self.ryu_app.watchers)
+        self.ryu_app.reload_config(None)
+        self.assertTrue(self.ryu_app.watchers)
+        self.assertFalse(self.ryu_app._config_files_changed())
+        # Load a new FAUCET config.
+        self._write_config(os.environ['FAUCET_CONFIG'], faucet_conf2)
+        self.assertTrue(self.ryu_app._config_files_changed())
+        self.ryu_app.reload_config(None)
+        self.assertTrue(self.ryu_app.watchers)
+        self.assertFalse(self.ryu_app._config_files_changed())
+        # Load an invalid Gauge config
+        self._write_config(os.environ['GAUGE_CONFIG'], 'invalid')
+        self.assertTrue(self.ryu_app._config_files_changed())
+        self.ryu_app.reload_config(None)
+        self.assertTrue(self.ryu_app.watchers)
+        # Keep trying to load a valid version.
+        self.assertTrue(self.ryu_app._config_files_changed())
+        # Load good Gauge config back
+        self._write_config(os.environ['GAUGE_CONFIG'], gauge_conf)
+        self.assertTrue(self.ryu_app._config_files_changed())
+        self.ryu_app.reload_config(None)
+        self.assertTrue(self.ryu_app.watchers)
+        self.assertFalse(self.ryu_app._config_files_changed())
 
 
 if __name__ == "__main__":

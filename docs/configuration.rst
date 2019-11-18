@@ -120,10 +120,6 @@ string names given to the datapath, or the OFP datapath id.
       - boolean
       - True
       - If True, Faucet will drop any packet from a broadcast source address
-    * - drop_lldp
-      - boolean
-      - True
-      - If True, Faucet will drop all LLDP packets arriving at the datapath.
     * - drop_spoofed_faucet_mac
       - boolean
       - True
@@ -253,7 +249,11 @@ string names given to the datapath, or the OFP datapath id.
     * - table_sizes
       - dictionary
       - {}
-      - For TFM based switches, size of each FAUCET table (all must be specified)
+      - For TFM based switches, size of each FAUCET table (any may be specified)
+    * - port_table_scale_factor
+      - float
+      - 1.0
+      - For TFM based switches, and for tables that are sized by number of ports, scale size estimate.
     * - global_vlan
       - int
       - 2**11-1
@@ -265,7 +265,7 @@ Stacking (DP)
 
 Stacking is configured in the dp configuration block and in the interface
 configuration block. At the dp level the following attributes can be configured
-withing the configuration block 'stack':
+within the configuration block 'stack':
 
 .. list-table:: dps: <dp name or id>: stack: {}
     :widths: 30 15 15 40
@@ -291,11 +291,11 @@ troubleshooting (e.g. so that a standard cable tester can display port
 information), verify FAUCET stacking topology, and cue a phone to use
 the right voice VLAN.
 
-NOTE: while FAUCET can receive and log LLDP from other devices, FAUCET
-does not do spanning tree those LLDP packets will have no influence
-on FAUCET's forwarding decisions.
+.. note:: While FAUCET can receive and log LLDP from other devices, FAUCET
+  does not do spanning tree. Those LLDP packets will have no influence
+  on FAUCET's forwarding decisions.
 
-The following attributes can be configured withing the 'lldp_beacon'
+The following attributes can be configured within the 'lldp_beacon'
 configuration block at the dp level:
 
 .. list-table:: dps: <dp name or id>: lldp_beacon: {}
@@ -318,6 +318,9 @@ configuration block at the dp level:
       - integer
       - None
       - The maximum number of beacons, across all ports to send each interval
+
+.. note:: When stack ports are enabled FAUCET automatically configures LLDP
+  with the default values for send_interval and max_per_interval to 5.
 
 802.1X (DP)
 ###########
@@ -351,13 +354,15 @@ Implemented:
   (configurable (per authentication) via returning the Session-Timeout attribute in the RADIUS Access-Accept message).
 - Faucet connects to a single RADIUS server, and passes through all EAP messages.
 - Client can end session with EAP-Logoff.
+- Dynamic assignment of the native VLAN.
+  Use RADIUS attribute Private-Group-Tunnel-ID in Radius Access-Accept with the name of the faucet VLAN.
 
 Not Supported (yet):
 
 - RADIUS Accounting.
 - Multiple RADIUS Servers.
 - Other EAP types. E.g. FAST, ...
-- Dynamic assignment of VLAN/ACL.
+- Dynamic assignment of ACL.
 
 802.1X port authentication is configured in the dp configuration block and in the interface
 configuration block. At the dp level the following attributes can be configured
@@ -391,13 +396,26 @@ with the configuration block 'dot1x':
       - str
       -
       - Shared secret used by the RADIUS server and the 802.1X speaker. - NOTE: Faucet will only use the config from the first dp
+    * - noauth_acl
+      - str
+      - None
+      - The name of the defined ACL [refer to acls.yaml for more information] that will be set to all 802.1X ports by default, that is before any user is authenticated. - NOTE: Faucet will only use the config from the first dp
+    * - auth_acl
+      - str
+      - None
+      - The name of the defined ACL [refer to acls.yaml for more information] that will be set to an 802.1X port when a user authenticates. - NOTE: Faucet will only use the config from the first dp
+    * - dot1x_assigned
+      - boolean
+      - False
+      - True, if this ACL can be dynamically assigned by a RADIUS server during 802.1X authentication.
+
 
 
 Interfaces
 ##########
 
 Configuration for each interface is entered in the 'interfaces' configuration
-block withing the config for the datapath. Each interface configuration block
+block within the config for the datapath. Each interface configuration block
 is a dictionary keyed by the interface name.
 
 Defaults for groups of interfaces can also be configured under the
@@ -435,6 +453,18 @@ OFP port number ranges (eg. 1-6).
       - boolean
       - False
       - Enable 802.1X port authentication
+    * - dot1x_acl
+      - boolean
+      - False
+      - Enable 802.1X ACL functionality on port (NOTE: Requires dot1x attribute)
+    * - dot1x_mab
+      - boolean
+      - False
+      - Enable 802.1X Mac Authentication Bypass on port (NOTE: Requires dot1x attribute)
+    * - enabled
+      - boolean
+      - True
+      - Enable 802.1X Per User ACLs on port (NOTE: Requires dot1x attribute and ACL with dot1x_assigned)
     * - enabled
       - boolean
       - True
@@ -468,7 +498,10 @@ OFP port number ranges (eg. 1-6).
         and all packets transmitted to, the ports specified
         (by name or by port number), to this port. If mirroring
         of denied by ACL packets is desired, use the ACL rule
-        mirror option.
+        mirror option. The mirrored packets are from the perspective
+        of hosts on the mirrored port (for example, a packet with a VLAN
+        tag, transmitted to a host on a mirrored and untagged port,
+        will be mirrored without its original VLAN tag).
     * - name
       - string
       - The configuration key.
@@ -490,10 +523,6 @@ OFP port number ranges (eg. 1-6).
       - boolean
       - False
       - If True, no packets will be accepted from this port.
-    * - override_output_port
-      - integer
-      - None
-      - If set, packets are sent to this other port.
     * - permanent_learn
       - boolean
       - False
@@ -513,6 +542,18 @@ OFP port number ranges (eg. 1-6).
       - boolean
       - True
       - If False unicast packets will not be flooded to this port.
+    * - restricted_bcast_arpnd
+      - boolean
+      - False
+      - If True, this port cannot send non-ARP/IPv6 ND broadcasts to other restricted_bcast_arpnd ports.
+    * - coprocessor
+      - dictionary
+      - None
+      - When enabled (strategy: vlan_vid), a packet received on this port is injected directly
+        into the FAUCET pipeline as if it were received on another port. Additionally, if a packet
+        is received with a VLAN corresponding to a port (by default, VID 1001 to port 1 - offset
+        is set with vlan_vid_base) the packet will be output to that port popping the outermost
+        VLAN header.
 
 
 Stacking (Interfaces)
@@ -533,7 +574,7 @@ interface configuration block. The following attributes can be configured:
     * - dp
       - integer or string
       - None
-      - The name of dp_id of the dp connected to this port
+      - The name or dp_id of the dp connected to this port
     * - port
       - integer or string
       - None
@@ -704,6 +745,11 @@ or a name. The following attributes can be configured:
       - string
       - None
       - Strictly informational
+    * - dot1x_assigned
+      - bool
+      - False
+      - True, if this VLAN can be dynamically assigned by a RADIUS server during 802.1X authentication.
+        Otherwise False
     * - faucet_vips
       - list of strings (IP address prefixes)
       - None
@@ -1047,7 +1093,11 @@ such as paths for configuration files and port numbers.
       - Colon-separated list of file paths
       - | /etc/faucet/faucet.yaml:
         | /etc/ryu/faucet/faucet.yaml
-      - Faucet will load it's configuration from the first valid file in list
+      - Faucet will load its configuration from the first valid file in list
+    * - FAUCET_CONFIG_AUTO_REVERT
+      - boolean
+      - False
+      - If true, Faucet will attempt to revert a bad config file back to the last known good version.
     * - FAUCET_CONFIG_STAT_RELOAD
       - boolean
       - False

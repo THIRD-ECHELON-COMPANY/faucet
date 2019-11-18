@@ -1,17 +1,18 @@
-Faucet on Cisco Switches (Beta)
-===============================
+Faucet on Cisco Switches
+========================
 
 Introduction
 ------------
-Cisco supports Openflow with FAUCET pipeline on the Catalyst 9000 Series switches.
 
-The solution support is currently in beta on the following models:
+Cisco supports Openflow with faucet pipeline on the Catalyst 9000 Series switches.
 
-- `C9300-48P-A <https://www.cisco.com/c/en/us/products/collateral/switches/catalyst-9300-series-switches/datasheet-c78-738977.html>`_
-- `C9410R with SUP1 <https://www.cisco.com/c/en/us/products/collateral/switches/catalyst-9400-series-switches/datasheet-c78-739053.html>`_
-- `C9500-48X-A <https://www.cisco.com/c/en/us/products/collateral/switches/catalyst-9500-series-switches/datasheet-c78-738978.html>`_
+Cisco IOS XE first introduced faucet support in version 16.9.1, however since
+faucet support is being continually improved on Cisco platforms we recommend
+running the latest stable release. Currently we would recommend running 16.12.1c or later.
 
-For access to the beta image and for solution support, please send an email to `cat9k-openflow-triage(mailer list) <cat9k-openflow-triage@cisco.com>`_.
+For official Cisco documentation on OpenFlow and faucet support see the following configuration guide:
+
+- `Programmability Configuration Guide, Cisco IOS XE Gibraltar 16.12.x <https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/1612/b_1612_programmability_cg/openflow.html>`_
 
 Setup
 -----
@@ -60,7 +61,7 @@ Configure Openflow
 	Switch-C9300(config-if)#end
 	Switch-C9300#
 
-** Configure the Openflow feature and controller connectivity **
+** Configure the Openflow feature and controller connectivity. **
 
 .. code-block::  console
 
@@ -74,6 +75,19 @@ Configure Openflow
 	Switch-C9300(config-openflow-switch)#datapath-id 0xABCDEF1234
 	Switch-C9300(config-openflow-switch)#end
 	Switch-C9300#
+
+** Disable DTP/keepalive on OpenFlow ports which may interfere with FAUCET. **
+
+        The following example will disable DTP and keepalives for TenGigabitEthernet1/0/1-24; adjust the range as necessary.
+
+.. code-block::  console
+
+        Switch-C9300(config)#interface range TenGigabitEthernet1/0/1-24
+        Switch-C9300(config-if-range)#switchport mode trunk
+        Switch-C9300(config-if-range)#switchport nonegotiate
+        Switch-C9300(config-if-range)#spanning-tree bpdufilter enable
+        Switch-C9300(config-if-range)#no keepalive
+        Switch-C9300(config-if-range)#exit
 
 Faucet
 ^^^^^^

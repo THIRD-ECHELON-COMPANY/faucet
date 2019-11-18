@@ -3,12 +3,12 @@ bitstring
 codecov
 concurrencytest
 deb_pkg_tools
-exabgp
+exabgp==4.1.2
 importlab>=0.3.1
 netifaces
 packaging
 pylint
 pytest-cov
-pytype==2019.3.21
+pytype==2019.10.17
 requests
-scapy==2.4.0 # pyup: ignore
+scapy==2.4.3

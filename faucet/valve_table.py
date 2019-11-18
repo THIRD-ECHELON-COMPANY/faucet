@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -72,6 +72,14 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
                         '%s not configured as set field in %s' % (field, self.name))
         return valve_of.set_field(**kwds)
 
+    def set_external_forwarding_requested(self):
+        """Set field for external forwarding requested."""
+        return self.set_field(**{valve_of.EXTERNAL_FORWARDING_FIELD: valve_of.PCP_EXT_PORT_FLAG})
+
+    def set_no_external_forwarding_requested(self):
+        """Set field for no external forwarding requested."""
+        return self.set_field(**{valve_of.EXTERNAL_FORWARDING_FIELD: valve_of.PCP_NONEXT_PORT_FLAG})
+
     def set_vlan_vid(self, vlan_vid):
         """Set VLAN VID with VID_PRESENT flag set.
 
@@ -84,26 +92,31 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
 
     # TODO: verify actions
     @staticmethod
-    def match(in_port=None, vlan=None, # pylint: disable=too-many-arguments
+    def match(in_port=None, vlan=None, # pylint: disable=too-many-arguments,too-many-locals
               eth_type=None, eth_src=None, eth_dst=None, eth_dst_mask=None,
               icmpv6_type=None, nw_proto=None, nw_dst=None, metadata=None,
-              metadata_mask=None, vlan_pcp=None):
+              metadata_mask=None, vlan_pcp=None, udp_src=None, udp_dst=None):
         """Compose an OpenFlow match rule."""
         match_dict = valve_of.build_match_dict(
             in_port, vlan, eth_type, eth_src,
             eth_dst, eth_dst_mask, icmpv6_type,
             nw_proto, nw_dst, metadata, metadata_mask,
-            vlan_pcp)
+            vlan_pcp, udp_src, udp_dst)
         return valve_of.match(match_dict)
 
     def _verify_flowmod(self, flowmod):
+        match_fields = flowmod.match.items()
         if valve_of.is_flowdel(flowmod):
-            return
-        if flowmod.priority == 0:
-            assert not flowmod.match.items(), (
-                'default flow cannot have matches')
-        elif self.match_types:
-            match_fields = flowmod.match.items()
+            if self.table_id != valve_of.ofp.OFPTT_ALL:
+                for match_type, match_field in match_fields:
+                    assert match_type in self.match_types, (
+                        '%s match in table %s' % (match_type, self.name))
+        else:
+            # TODO: ACL builder should not use ALL table.
+            if self.table_id == valve_of.ofp.OFPTT_ALL:
+                return
+            assert not (flowmod.priority == 0 and match_fields), (
+                'default flow cannot have matches on table %s: %s' % (self.name, flowmod))
             for match_type, match_field in match_fields:
                 assert match_type in self.match_types, (
                     '%s match in table %s' % (match_type, self.name))
@@ -112,10 +125,10 @@ class ValveTable: # pylint: disable=too-many-arguments,too-many-instance-attribu
                 assert config_mask or (not config_mask and not flow_mask), (
                     '%s configured mask %s but flow mask %s in table %s (%s)' % (
                         match_type, config_mask, flow_mask, self.name, flowmod))
-            if self.exact_match:
-                assert len(self.match_types) == len(match_fields), (
-                    'exact match table matches %s do not match flow matches %s (%s)' % (
-                        self.match_types, match_fields, flowmod))
+                if self.exact_match and match_fields:
+                    assert len(self.match_types) == len(match_fields), (
+                        'exact match table %s matches %s do not match flow matches %s (%s)' % (
+                            self.name, self.match_types, match_fields, flowmod))
 
     def flowmod(self, match=None, priority=None, # pylint: disable=too-many-arguments
                 inst=None, command=valve_of.ofp.OFPFC_ADD, out_port=0,

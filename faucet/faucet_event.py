@@ -1,9 +1,4 @@
-"""Experimental FAUCET event notification."""
-
-#### THIS API IS EXPERIMENTAL.
-#### Discuss with faucet-dev list before relying on this API,
-#### review http://www.hyrumslaw.com/.
-#### It is subject to change without notice.
+"""FAUCET event notification."""
 
 # TODO: events are currently schema-less. This is to facilitate rapid prototyping, and will change.
 # TODO: not all cases where a notified client fails or could block, have been tested.
@@ -13,7 +8,7 @@
 # Copyright (C) 2013 Nippon Telegraph and Telephone Corporation.
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -59,7 +54,7 @@ class NonBlockLock:
         self._lock.release()
 
 
-class FaucetExperimentalEventNotifier:
+class FaucetEventNotifier:
     """Event notification, via Unix domain socket."""
 
     def __init__(self, socket_path, metrics, logger):
@@ -88,7 +83,7 @@ class FaucetExperimentalEventNotifier:
                 self.logger.info('event client connected')
                 while True:
                     event = self.event_q.get()
-                    event_bytes = bytes('\n'.join((json.dumps(event), '')).encode('UTF-8'))
+                    event_bytes = bytes('\n'.join((json.dumps(event, default=str), '')).encode('UTF-8'))
                     try:
                         sock.sendall(event_bytes)
                     except (socket.error, IOError) as err:

@@ -2,13 +2,14 @@
 
 UNITTESTS=1
 DEPCHECK=1
+SKIP_PIP=0
 MINCOVERAGE=85
 
 set -e  # quit on error
 
 # allow user to skip parts of docker test
 # this wrapper script only cares about -n, -u, -i, others passed to test suite.
-while getopts "cdijknsux" o $FAUCET_TESTS; do
+while getopts "cdijknrsuxozlp" o $FAUCET_TESTS; do
   case "${o}" in
         i)
             # run only integration tests
@@ -23,6 +24,11 @@ while getopts "cdijknsux" o $FAUCET_TESTS; do
             # skip unit tests
             UNITTESTS=0
             ;;
+        z)
+            # Skip pip installer
+            echo "Option set to assume environment is set up."
+            SKIP_PIP=1
+            ;;
         *)
             ;;
     esac
@@ -34,11 +40,14 @@ if [ -f /venv/bin/activate ]; then
   source /venv/bin/activate
 fi
 
-if [ -d /var/tmp/pip-cache ] ; then
-  echo Using pip cache
-  cp -r /var/tmp/pip-cache /var/tmp/pip-cache-local
+if [ "$SKIP_PIP" == 0 ] ; then
+    if [ -d /var/tmp/pip-cache ] ; then
+      echo Using pip cache
+    fi
+    ./docker/pip_deps.sh "--cache-dir=/var/tmp/pip-cache"
+else
+    echo "Skipping Pip Install Script"
 fi
-./docker/pip_deps.sh "--cache-dir=/var/tmp/pip-cache-local"
 
 echo "========== checking IPv4/v6 localhost is up ====="
 ping6 -c 1 ::1
@@ -94,6 +103,47 @@ export http_proxy=
 
 cd /faucet-src/tests/integration
 ./mininet_main.py -c
+
+
+if [ "$HWTESTS" == 1 ] ; then
+  echo "========== Simulating hardware test switch =========="
+  ovs-vsctl add-br hwbr &&
+    ovs-vsctl set-controller hwbr tcp:127.0.0.1:6653 tcp:127.0.0.1:6654 &&
+    ovs-vsctl set-fail-mode hwbr secure &&
+    ovs-vsctl set Open_vSwitch . other_config:vlan-limit=2 ||
+    exit 1
+  DPID='0x'`sudo ovs-vsctl get bridge hwbr datapath-id|sed 's/"//g'`
+  DP_PORTS=""
+  N=$'\n'
+  # TODO: randomize OF port range (offset from 1 for basic test)
+  for p in `seq 2 5` ; do
+    HWP="hwp$p"
+    PHWP="p$HWP"
+    ip link add dev $HWP type veth peer name $PHWP &&
+      ifconfig $PHWP up &&
+      ovs-vsctl add-port hwbr $PHWP -- set interface $PHWP ofport_request=$p ||
+      exit 1
+    for i in $HWP $PHWP ; do
+      echo 1 > /proc/sys/net/ipv6/conf/$i/disable_ipv6
+      ip -4 addr flush dev $i
+      ip -6 addr flush dev $i
+    done
+    DP_PORTS="  ${p}: ${HWP}${N}${DP_PORTS}"
+  done
+  cat > /tmp/hw_switch_config.yaml << EOL
+hw_switch: True
+hardware: 'Open vSwitch TFM'
+of_port: 6653
+gauge_of_port: 6654
+cpn_intf: lo
+dp_ports:
+${DP_PORTS}
+dpid: ${DPID}
+EOL
+  mkdir -p /etc/faucet && cp /tmp/hw_switch_config.yaml /etc/faucet || exit 1
+  cat /etc/faucet/hw_switch_config.yaml && ovs-vsctl show && ovs-ofctl dump-ports hwbr || exit 1
+fi
+
 time ./mininet_main.py $FAUCET_TESTS || test_failures+=" mininet_main"
 
 cd /faucet-src/clib

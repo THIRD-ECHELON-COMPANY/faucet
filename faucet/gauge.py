@@ -1,7 +1,7 @@
 """RyuApp shim between Ryu and Gauge."""
 
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ class Gauge(RyuAppBase):
         super(Gauge, self).__init__(*args, **kwargs)
         self.watchers = {}
         self.config_watcher = ConfigWatcher()
+        self.faucet_config_watchers = []
         self.prom_client = GaugePrometheusClient(reg=self._reg)
         self.thread_managers = (self.prom_client,)
 
@@ -70,18 +71,20 @@ class Gauge(RyuAppBase):
     def _load_config(self):
         """Load Gauge config."""
         try:
-            new_confs = watcher_parser(self.config_file, self.logname, self.prom_client)
+            conf_hash, faucet_config_files, faucet_conf_hashes, new_confs = watcher_parser(
+                self.config_file, self.logname, self.prom_client)
+            watchers = [
+                watcher_factory(watcher_conf)(watcher_conf, self.logname, self.prom_client)
+                for watcher_conf in new_confs]
         except InvalidConfigError as err:
+            self.config_watcher.update(self.config_file)
             self.logger.error('invalid config: %s', err)
             return
 
         for old_watchers in self.watchers.values():
             self._stop_watchers(old_watchers)
-
         new_watchers = {}
-
-        for conf in new_confs:
-            watcher = watcher_factory(conf)(conf, self.logname, self.prom_client)
+        for watcher in watchers:
             watcher_dpid = watcher.dp.dp_id
             watcher_type = watcher.conf.type
             if watcher_dpid not in new_watchers:
@@ -97,7 +100,14 @@ class Gauge(RyuAppBase):
                 self._start_watchers(ryu_dp, watchers, timestamp)
 
         self.watchers = new_watchers
-        self.config_watcher.update(self.config_file)
+        self.config_watcher.update(
+            self.config_file, {self.config_file: conf_hash})
+        self.faucet_config_watchers = []
+        for faucet_config_file, faucet_conf_hash in faucet_conf_hashes.items():
+            faucet_config_watcher = ConfigWatcher()
+            faucet_config_watcher.update(faucet_config_file, faucet_conf_hash)
+            self.faucet_config_watchers.append(faucet_config_watcher)
+            self.logger.info('watching FAUCET config %s' % faucet_config_file)
         self.logger.info('config complete')
 
     @kill_on_exception(exc_logname)
@@ -108,10 +118,13 @@ class Gauge(RyuAppBase):
             return
         if name in watchers:
             for watcher in watchers[name]:
-                watcher.update(ryu_event.timestamp, ryu_dp.id, msg)
+                watcher.update(ryu_event.timestamp, msg)
 
     def _config_files_changed(self):
-        return self.config_watcher.files_changed()
+        for config_watcher in [self.config_watcher] + self.faucet_config_watchers:
+            if config_watcher.files_changed():
+                return True
+        return False
 
     @set_ev_cls(EventReconfigure, MAIN_DISPATCHER)
     def reload_config(self, ryu_event):
@@ -129,7 +142,7 @@ class Gauge(RyuAppBase):
                     for port in ryu_dp.ports.values():
                         msg = parser.OFPPortStatus(
                             ryu_dp, desc=port, reason=ofp.OFPPR_ADD)
-                        watcher.update(timestamp, ryu_dp.id, msg)
+                        watcher.update(timestamp, msg)
                 watcher.start(ryu_dp, is_active)
 
     @kill_on_exception(exc_logname)
@@ -169,19 +182,21 @@ class Gauge(RyuAppBase):
         self._stop_watchers(watchers)
 
     _WATCHER_HANDLERS = {
-        ofp_event.EventOFPPortStatus: 'port_state', # pylint: disable=no-member
-        ofp_event.EventOFPPortStatsReply: 'port_stats', # pylint: disable=no-member
-        ofp_event.EventOFPFlowStatsReply: 'flow_table', # pylint: disable=no-member
+        ofp_event.EventOFPPortStatus: 'port_state',  # pylint: disable=no-member
+        ofp_event.EventOFPPortStatsReply: 'port_stats',  # pylint: disable=no-member
+        ofp_event.EventOFPFlowStatsReply: 'flow_table',  # pylint: disable=no-member
+        ofp_event.EventOFPMeterStatsReply: 'meter_stats',  # pylint: disable=no-member
     }
 
-    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER) # pylint: disable=no-member
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER) # pylint: disable=no-member
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER) # pylint: disable=no-member
+    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)  # pylint: disable=no-member
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)  # pylint: disable=no-member
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)  # pylint: disable=no-member
+    @set_ev_cls(ofp_event.EventOFPMeterStatsReply, MAIN_DISPATCHER)  # pylint: disable=no-member
     @kill_on_exception(exc_logname)
     def update_watcher_handler(self, ryu_event):
-        """Handle port status change event.
+        """Handle any kind of stats/change event.
 
         Args:
-           ryu_event (ryu.controller.event.EventReplyBase): port status change event.
+           ryu_event (ryu.controller.event.EventReplyBase): stats/change event.
         """
         self._update_watcher(self._WATCHER_HANDLERS[type(ryu_event)], ryu_event)

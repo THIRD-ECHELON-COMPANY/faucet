@@ -15,12 +15,14 @@ all dependencies correctly installed. See ../docs/.
 import argparse
 import collections
 import copy
+import cProfile
 import json
 import glob
 import inspect
 import os
 import sys
 import multiprocessing
+import pstats
 import random
 import re
 import shutil
@@ -44,10 +46,9 @@ DEFAULT_HARDWARE = 'Open vSwitch'
 
 # Only these hardware types will be tested with meters.
 SUPPORTS_METERS = (
+    DEFAULT_HARDWARE,  # TODO: tested with OVS userspace only.
     'Aruba',
     'NoviFlow',
-# TODO: troubleshoot meters in OVS 2.10.0
-#   DEFAULT_HARDWARE,
     'ZodiacGX',
 )
 
@@ -85,8 +86,8 @@ EXTERNAL_DEPENDENCIES = (
      r'fping: Version (\d+\.\d+)', "3.10"),
     ('rdisc6', ['-V'], 'ndisc6',
      r'ndisc6.+tool (\d+\.\d+)', "1.0"),
-    ('tshark', ['-v'], 'tshark',
-     r'TShark.+(\d+\.\d+)', "2.1"),
+    ('tshark', ['-v'], r'(?i)tshark',
+     r'TShark\s*[a-zA-Z\(\)]*\s*([\d\.]+)', "2.1"),
     ('scapy', ['-h'], 'Usage: scapy', '', 0),
 )
 
@@ -94,6 +95,25 @@ EXTERNAL_DEPENDENCIES = (
 HW_SWITCH_CONFIG_FILE = 'hw_switch_config.yaml'
 CONFIG_FILE_DIRS = ['/etc/faucet', './', '/faucet-src']
 REQUIRED_TEST_PORTS = 4
+
+REQUIRED_HW_CONFIG = {
+    'dp_ports': (dict,),
+    'cpn_intf': (str,),
+    'dpid': (int,),
+    'hardware': (str,),
+    'hw_switch': (bool,),
+    'of_port': (int,),
+    'gauge_of_port': (int,),
+}
+
+OPTIONAL_HW_CONFIG = {
+    'cpn_ipv6': (bool,),
+    'ctl_privkey': (str,),
+    'ca_certs': (str,),
+    'ctl_cert': (str,),
+}
+
+ALL_HW_CONFIG = {**REQUIRED_HW_CONFIG, **OPTIONAL_HW_CONFIG}
 
 
 def import_hw_config():
@@ -113,41 +133,31 @@ def import_hw_config():
     except IOError:
         print('Could not load YAML config data from %s' % config_file_name)
         sys.exit(-1)
-    if 'hw_switch' in config:
-        hw_switch = config['hw_switch']
-        if not isinstance(hw_switch, bool):
-            print('hw_switch must be a bool: ' % hw_switch)
+    if config.get('hw_switch', False):
+        unknown_keys = set(config.keys()) - set(ALL_HW_CONFIG.keys())
+        if unknown_keys:
+            print('unknown config %s in %s' % (unknown_keys, config_file_name))
             sys.exit(-1)
-        if not hw_switch:
-            return None
-        required_config = {
-            'dp_ports': (dict,),
-            'cpn_intf': (str,),
-            'dpid': (int,),
-            'of_port': (int,),
-            'gauge_of_port': (int,),
-        }
-        for required_key, required_key_types in required_config.items():
-            if required_key not in config:
-                print('%s must be specified in %s to use HW switch.' % (
-                    required_key, config_file_name))
+        missing_required_keys = set(REQUIRED_HW_CONFIG.keys()) - set(config.keys())
+        if missing_required_keys:
+            print('missing required config: %s' % missing_required_keys)
+            sys.exit(-1)
+        for config_key, config_value in config.items():
+            valid_types = ALL_HW_CONFIG[config_key]
+            valid_values = [
+                config_value for valid_type in valid_types
+                if isinstance(config_value, valid_type)]
+            if not valid_values:
+                print('%s (%s) must be of type %s in %s' % (
+                    config_key, config_value,
+                    valid_types, config_file_name))
                 sys.exit(-1)
-            required_value = config[required_key]
-            key_type_ok = False
-            for key_type in required_key_types:
-                if isinstance(required_value, key_type):
-                    key_type_ok = True
-                    break
-            if not key_type_ok:
-                print('%s (%s) must be %s in %s' % (
-                    required_key, required_value,
-                    required_key_types, config_file_name))
-                sys.exit(1)
         dp_ports = config['dp_ports']
-        if len(dp_ports) != REQUIRED_TEST_PORTS:
-            print('Exactly %u dataplane ports are required, '
+        if len(dp_ports) < REQUIRED_TEST_PORTS:
+            print('At least %u dataplane ports are required, '
                   '%d are provided in %s.' %
                   (REQUIRED_TEST_PORTS, len(dp_ports), config_file_name))
+            sys.exit(-1)
         return config
     return None
 
@@ -201,13 +211,13 @@ def check_dependencies():
     return True
 
 
-def make_suite(tc_class, hw_config, root_tmpdir, ports_sock, max_test_load):
+def make_suite(tc_class, hw_config, root_tmpdir, ports_sock, max_test_load, port_order):
     """Compose test suite based on test class names."""
     testloader = unittest.TestLoader()
     testnames = testloader.getTestCaseNames(tc_class)
     suite = unittest.TestSuite()
     for name in testnames:
-        suite.addTest(tc_class(name, hw_config, root_tmpdir, ports_sock, max_test_load))
+        suite.addTest(tc_class(name, hw_config, root_tmpdir, ports_sock, max_test_load, port_order))
     return suite
 
 
@@ -361,7 +371,7 @@ def max_loadavg():
 
 
 def expand_tests(module, requested_test_classes, excluded_test_classes,
-                 hw_config, root_tmpdir, ports_sock, serial):
+                 hw_config, root_tmpdir, ports_sock, serial, port_order):
     sanity_test_suites = []
     single_test_suites = []
     parallel_test_suites = []
@@ -379,7 +389,7 @@ def expand_tests(module, requested_test_classes, excluded_test_classes,
                 continue
             print('adding test %s' % test_name)
             test_suite = make_suite(
-                test_obj, hw_config, root_tmpdir, ports_sock, max_loadavg())
+                test_obj, hw_config, root_tmpdir, ports_sock, max_loadavg(), port_order)
             if test_name.startswith('FaucetSanity'):
                 sanity_test_suites.append(test_suite)
             else:
@@ -413,10 +423,25 @@ def expand_tests(module, requested_test_classes, excluded_test_classes,
 class FaucetResult(unittest.runner.TextTestResult): # pytype: disable=module-attr
 
     root_tmpdir = None
+    test_duration_secs = {}
 
     def _test_tmpdir(self, test):
         return os.path.join(
             self.root_tmpdir, mininet_test_util.flat_test_name(test.id()))
+
+    def _set_test_duration_secs(self, test):
+        duration_file_name = os.path.join(self._test_tmpdir(test), 'test_duration_secs')
+        if test.id() not in self.test_duration_secs:
+            self.test_duration_secs[test.id()] = 0
+        try:
+            with open(duration_file_name) as duration_file:
+                self.test_duration_secs[test.id()] = int(duration_file.read())
+        except FileNotFoundError:
+            pass
+
+    def stopTest(self, test):
+        self._set_test_duration_secs(test)
+        super(FaucetResult, self).stopTest(test)
 
 
 class FaucetCleanupResult(FaucetResult):
@@ -424,8 +449,8 @@ class FaucetCleanupResult(FaucetResult):
     successes = []
 
     def addSuccess(self, test):
-        test_tmpdir = self._test_tmpdir(test)
-        shutil.rmtree(test_tmpdir)
+        self._set_test_duration_secs(test)
+        shutil.rmtree(self._test_tmpdir(test))
         self.successes.append((test, ''))
         super(FaucetCleanupResult, self).addSuccess(test)
 
@@ -463,13 +488,15 @@ def run_sanity_test_suite(root_tmpdir, resultclass, sanity_tests):
     return sanity_result
 
 
-def report_tests(test_status, test_list):
+def report_tests(test_status, test_list, result):
     tests_json = {}
     for test_class, test_text in test_list:
         test_text = test_text.replace('\n', '\t')
         test_text = test_text.replace('"', '\'')
+        test_duration_secs = result.test_duration_secs[test_class.id()]
         tests_json.update({
-            test_class.id(): {'status': test_status, 'output': test_text}})
+            test_class.id(): {
+                'status': test_status, 'output': test_text, 'test_duration_secs': test_duration_secs}})
     return tests_json
 
 
@@ -490,8 +517,9 @@ def report_results(results, hw_config, report_json_filename):
                 test_lists.append(
                     ('OK', result.successes))
             for test_status, test_list in test_lists:
-                tests_json.update(report_tests(test_status, test_list))
-        print(yaml.dump(tests_json, default_flow_style=False, explicit_start=True, explicit_end=True))
+                tests_json.update(report_tests(test_status, test_list, result))
+        print(yaml.dump(
+            tests_json, default_flow_style=False, explicit_start=True, explicit_end=True))
         if report_json_filename:
             report_json = {
                 'hw_config': hw_config,
@@ -585,8 +613,11 @@ def clean_test_dirs(root_tmpdir, all_successful, sanity, keep_logs, dumpfail):
 
 
 def run_tests(module, hw_config, requested_test_classes, dumpfail,
-              keep_logs, serial, excluded_test_classes, report_json_filename):
+              keep_logs, serial, repeat, excluded_test_classes, report_json_filename,
+              port_order):
     """Actually run the test suites, potentially in parallel."""
+    if repeat:
+        print('Will repeat tests until failure')
     if hw_config is not None:
         print('Testing hardware, forcing test serialization')
         serial = True
@@ -599,27 +630,42 @@ def run_tests(module, hw_config, requested_test_classes, dumpfail,
         min_free_ports = 5
     ports_sock = start_port_server(root_tmpdir, start_free_ports, min_free_ports)
     print('test ports server started')
-    sanity_tests, single_tests, parallel_tests = expand_tests(
-        module, requested_test_classes, excluded_test_classes,
-        hw_config, root_tmpdir, ports_sock, serial)
     resultclass = FaucetCleanupResult
     if keep_logs:
         resultclass = FaucetResult
     all_successful = False
-    sanity_result = run_sanity_test_suite(root_tmpdir, resultclass, sanity_tests)
-    if sanity_result.wasSuccessful():
-        all_successful = run_test_suites(
-            report_json_filename, hw_config, root_tmpdir,
-            resultclass, single_tests, parallel_tests, sanity_result)
+
+    sanity_tests, single_tests, parallel_tests = expand_tests(
+        module, requested_test_classes, excluded_test_classes,
+        hw_config, root_tmpdir, ports_sock, serial, port_order)
+
+    if (sanity_tests.countTestCases() + single_tests.countTestCases() + parallel_tests.countTestCases()):
+        sanity_result = run_sanity_test_suite(root_tmpdir, resultclass, sanity_tests)
+        if sanity_result.wasSuccessful():
+            while True:
+                all_successful = run_test_suites(
+                    report_json_filename, hw_config, root_tmpdir,
+                    resultclass, copy.deepcopy(single_tests),
+                    copy.deepcopy(parallel_tests), sanity_result)
+                if not repeat:
+                    break
+                if not all_successful:
+                    break
+                print('repeating run')
+        else:
+            report_results([sanity_result], hw_config, report_json_filename)
+
+        decoded_pcap_logs = glob.glob(os.path.join(
+            os.path.join(root_tmpdir, '*'), '*of.cap.txt'))
+        pipeline_superset_report(decoded_pcap_logs)
+        clean_test_dirs(
+            root_tmpdir, all_successful,
+            sanity_result.wasSuccessful(), keep_logs, dumpfail)
     else:
-        report_results([sanity_result], hw_config, report_json_filename)
-    os.remove(ports_sock)
-    decoded_pcap_logs = glob.glob(os.path.join(
-        os.path.join(root_tmpdir, '*'), '*of.cap.txt'))
-    pipeline_superset_report(decoded_pcap_logs)
-    clean_test_dirs(
-        root_tmpdir, all_successful,
-        sanity_result.wasSuccessful(), keep_logs, dumpfail)
+        print('no tests selected')
+        shutil.rmtree(root_tmpdir)
+        sys.exit(0)
+
     if not all_successful:
         sys.exit(-1)
 
@@ -635,8 +681,18 @@ def parse_args():
         '-d', '--dumpfail', action='store_true', help='dump logs for failed tests')
     parser.add_argument(
         '-k', '--keep_logs', action='store_true', help='keep logs even for OK tests')
+    loglevels = ('debug', 'error', 'warning', 'info', 'output')
+    parser.add_argument(
+        '-l', '--loglevel', choices=loglevels, default='warning',
+        help='set mininet logging level')
     parser.add_argument(
         '-n', '--nocheck', action='store_true', help='skip dependency check')
+    parser.add_argument(
+        '-o', '--order', default='random',
+        help='port order for tests: 0,1,2,3 | random (default: random)')
+    parser.add_argument(
+        '-p', '--profile', action='store_true',
+        help='use Cprofile to report elapsed wall clock time per function')
     parser.add_argument(
         '-i', '--integration', default=True, action='store_true', help='run integration tests')
     parser.add_argument(
@@ -645,13 +701,23 @@ def parse_args():
         '-j', '--jsonreport', help='write a json file with test results')
     parser.add_argument(
         '-x', help='list of test classes to exclude')
+    parser.add_argument(
+        '-r', '--repeat', action='store_true', help='repeat tests until failure')
 
     excluded_test_classes = []
     report_json_filename = None
 
     try:
         args, requested_test_classes = parser.parse_known_args(sys.argv[1:])
-    except(KeyError, IndexError):
+        if args.order == 'random':
+            port_order = list(range(4))
+            random.shuffle(port_order)
+        else:
+            port_order = [int(s) for s in args.order.split(',')]
+        if sorted(port_order) != sorted(range(len(port_order))):
+            print('Port order should be a permutation of 0,1,2,3')
+            raise ValueError
+    except(KeyError, IndexError, ValueError):
         parser.print_usage()
         sys.exit(-1)
 
@@ -659,24 +725,32 @@ def parse_args():
         report_json_filename = args.jsonreport
     if args.x:
         excluded_test_classes = args.x.split(',')
+
+
     return (
         requested_test_classes, args.clean, args.dumpfail,
-        args.keep_logs, args.nocheck, args.serial,
-        excluded_test_classes, report_json_filename)
+        args.keep_logs, args.nocheck, args.serial, args.repeat,
+        excluded_test_classes, report_json_filename, port_order,
+        args.loglevel, args.profile)
 
 
 def test_main(module):
     """Test main."""
-    setLogLevel('error')
+
     print('testing module %s' % module)
+
     (requested_test_classes, clean, dumpfail, keep_logs, nocheck,
-     serial, excluded_test_classes, report_json_filename) = parse_args()
+     serial, repeat, excluded_test_classes, report_json_filename, port_order,
+     loglevel, profile) = parse_args()
+
+    setLogLevel(loglevel)
 
     if clean:
         print('Cleaning up test interfaces, processes and openvswitch '
               'configuration from previous test runs')
         Cleanup.cleanup()
         sys.exit(0)
+
     if nocheck:
         print('Skipping dependency checks')
     else:
@@ -684,7 +758,21 @@ def test_main(module):
             print('dependency check failed. check required library/binary '
                   'list in header of this script')
             sys.exit(-1)
+
+    print("port order: -o", ','.join(str(i) for i in port_order))
+
+
     hw_config = import_hw_config()
+
+    if profile:
+        pr = cProfile.Profile(time.time)  # use wall clock time
+        pr.enable()
+
     run_tests(
         module, hw_config, requested_test_classes, dumpfail,
-        keep_logs, serial, excluded_test_classes, report_json_filename)
+        keep_logs, serial, repeat, excluded_test_classes, report_json_filename, port_order)
+
+    if profile:
+        pr.disable()
+        ps = pstats.Stats(pr).sort_stats('cumulative')
+        ps.print_stats()

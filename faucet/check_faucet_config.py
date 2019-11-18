@@ -4,7 +4,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ def check_config(conf_files, debug_level, check_output_file):
             check_result = False
 
             try:
-                _, dps = dp_parser(conf_file, logname)
+                _, _, dps, _ = dp_parser(conf_file, logname)
                 if dps is not None:
                     dps_conf = [(valve.valve_factory(dp), dp.to_conf()) for dp in dps]
                     check_output.extend([conf for _, conf in dps_conf])

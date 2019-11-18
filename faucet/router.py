@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ class Router(Conf):
             self._check_conf_types(self.bgp, self.bgp_defaults_types)
             self.bgp = self._set_unknown_conf(self.bgp, self.bgp_defaults_types)
             if not self.bgp_connect_mode():
-                self.bgp['bgp']['connect_mode'] = 'passive'
+                self.bgp['connect_mode'] = 'passive'
             for field in self.ipaddress_fields:
                 if field in self.bgp:
                     self.bgp[field] = frozenset([

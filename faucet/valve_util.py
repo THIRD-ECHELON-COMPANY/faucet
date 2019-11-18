@@ -2,7 +2,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,6 +73,7 @@ DEFAULTS = {
         _PREFIX,
         '/etc/ryu/faucet/faucet.yaml')),
     'FAUCET_CONFIG_STAT_RELOAD': False,
+    'FAUCET_CONFIG_AUTO_REVERT': False,
     'FAUCET_LOG_LEVEL': 'INFO',
     'FAUCET_LOG': _PREFIX + '/var/log/faucet/faucet.log',
     'FAUCET_EVENT_SOCK': '',  # Special-case, see get_setting().

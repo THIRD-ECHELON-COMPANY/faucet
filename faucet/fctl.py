@@ -8,7 +8,7 @@
 
 # Copyright (C) 2015 Brad Cowie, Christopher Lorier and Joe Stringer.
 # Copyright (C) 2015 Research and Education Advanced Network New Zealand Ltd.
-# Copyright (C) 2015--2018 The Contributors
+# Copyright (C) 2015--2019 The Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ def scrape_prometheus(endpoints, retries=3, err_output_file=sys.stdout):
     return metrics
 
 def _get_samples_from_metrics(metrics, metric_name, label_matches,
-                                        nonzero_only=False):
+                              nonzero_only=False):
     result = []
     for metric in metrics:
         if metric_name is None or metric.name == metric_name:
